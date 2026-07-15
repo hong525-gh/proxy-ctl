@@ -1,0 +1,14 @@
+# Editor / OS junk
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local backups made during install
+*.bak
+*.pre-proxyctl.bak
+
+# Direnv / local overrides
+.envrc
+.env.local
