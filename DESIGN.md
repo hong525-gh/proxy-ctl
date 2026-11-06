@@ -194,7 +194,7 @@ _pc_apply() {
     export http_proxy="$url"  HTTP_PROXY="$url"
     export https_proxy="$url" HTTPS_PROXY="$url"
     export all_proxy="$socks" ALL_PROXY="$socks"
-    export no_proxy="localhost,127.0.0.0/8,::1,.local"
+    export no_proxy="localhost,127.0.0.0/8,::1,.local,kimi.com,.kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com"
     export NO_PROXY="$no_proxy"
 }
 
