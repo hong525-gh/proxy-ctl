@@ -27,7 +27,12 @@ _pc_apply() {
     # xray 10808 是 HTTP+SOCKS 混合入站，故三类协议可指向同一 endpoint。
     local url="http://$1:$2"
     local socks="socks5://$1:$2"
-    local ignore="localhost,127.0.0.0/8,::1,.local"
+    # 2026-11-06: kimi.com 加入 no_proxy —— dsh 调 Kimi 走本地 xray 跳频繁被 RST
+    # （晚高峰约半数请求 3-11 秒内 Connection error），国内端点本就该直连。
+    # 同日补显式子域名（api/code/auth/telemetry-logs），兼容不做后缀匹配的
+    # no_proxy 实现（部分 Node/Go HTTP 客户端只认全等或前导点）。
+    # A/B 实验：若 1-2 天内晚高峰不再出现，则元凶是本地 xray 跳，此改动保留。
+    local ignore="localhost,127.0.0.0/8,::1,.local,kimi.com,.kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com"
     export http_proxy="$url"    HTTP_PROXY="$url"
     export https_proxy="$url"   HTTPS_PROXY="$url"
     export all_proxy="$socks"   ALL_PROXY="$socks"
