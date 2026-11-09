@@ -227,10 +227,13 @@ vpnctl install [--dry-run] --xray <path> --xray-sha256 <hex>
 ```bash
 jq -e '
   (.inbounds | length) > 0
-  and ([.inbounds[] | select(.protocol == "mixed")] | length) == 1
-  and ([.inbounds[] | select(.protocol == "mixed")][0].listen) == "127.0.0.1"
-  and ([.inbounds[] | select(.protocol == "mixed")][0].port) == 10808
+  and ([.inbounds[] | select(.protocol == "mixed" and (.port|tostring) == "10808")] | length) == 1
+  and ([.inbounds[] | select((.port|tostring) == "10808")][0].listen) == "127.0.0.1"
   and ([.inbounds[] | select(.listen == "0.0.0.0")] | length) == 0
+  and ([.inbounds[] | select(.tag != "ts-in" and .listen != "127.0.0.1")] | length) == 0
+  and ([.inbounds[] | select(.tag == "ts-in" and (.protocol != "mixed" or (.port|tostring) != "10809" or .listen != "127.0.0.1"))] | length) == 0
+  and ([.routing.rules[]? | select((.inboundTag // []) | index("ts-in"))] | length)
+      == ([.inbounds[] | select(.tag == "ts-in")] | length)
   and ([.outbounds[] | select(.protocol == "vless")] | length) >= 1
   and ([.outbounds[]
         | select(.protocol == "vless")
@@ -247,6 +250,16 @@ jq -e '
 至少一个，并且每一个都必须是 REALITY + Vision、公钥与 shortId 非空。
 
 另加文件检查：`geoip.dat`、`geosite.dat` 存在且大于 1 MB。
+
+**诊断入站 `ts-in`（2026-11-09）**：`127.0.0.1:10809`，mixed 协议，唯一用途是让
+`vpnctl check` 有一条**只走 `proxy-ts`** 的路径。路由首条是
+`inboundTag: ["ts-in"] → proxy-ts`，因此它不受 Telegram 域名规则变化的影响。
+策略断言要求：额外入站必须绑 `127.0.0.1`、`ts-in` 必须是 mixed 且端口 10809、
+`ts-in` 入站与引用它的路由规则必须同时存在或同时不存在。
+`check` 经 10809 请求 `https://api.telegram.org/`（2xx/3xx 记为 ok），
+把 `ts_state`/`ts_ms`/`ts_code` 写进 `health.json`；`status` 的 `egress` 行显示结果。
+**这条探针失败不会把整体健康判为 fail**（否则 `AUTO_OFF` 会因为 Telegram 一条路断了
+而关掉全部代理），只在 `status` 里给出 warn。
 
 **geo 代码清单（2026-11-09）**：`geo-manifest.py` 用最小 protobuf 读取器列出
 `geosite.dat` / `geoip.dat` 里真实存在的代码，结果写在
@@ -663,6 +676,24 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 - 配置是 v2rayN 的快照，后续 v2rayN 升级不会同步；这是有意的解耦。
 - 更新安全最终依赖人工核查：工具能强制“官方来源、60 天门槛、SHA256、证据”，但无法证明“没有投毒”；证据文件是流程约束，不是技术保证。
 
+### 11.1 这套配置不保护什么（2026-11-09）
+
+来自对 [sing-box 配置生成器](https://github.com/riverscn/singbox-confgen) DESIGN.md
+“已知局限”的对照：那份文档明确写出自己覆盖不到的地方，避免使用者误判。以下每条都能
+在配置或实测里找到依据，改配置前请先读这一节。
+
+| 不保护的情况 | 依据 | 后果 |
+|---|---|---|
+| **不走系统代理的应用** | 无 TUN，GNOME `mode=manual` 只影响遵守系统代理的程序 | 这类程序完全不经 xray，分流、IPv6 守卫、域名规则都管不到 |
+| **浏览器自带安全 DNS（DoH）** | 与 xray 无关，浏览器自己解析 | 绕过 DNS 分流：拿到的地址可能被污染，或与路由判断不一致。本机 Chrome 未手动设置 secure DNS（默认自动），当前未触发；一旦开启或路由器被识别为已知 DoH 解析器即生效 |
+| **未走代理的域名解析** | `routing.domainStrategy = "AsIs"`，客户端解析由 systemd-resolved → `192.168.0.1` 完成；2026-11-09 实测（临时实例 + access log，5 条流量）目标一律以**域名**记录、`dns-module` 出现 **0 次** | 这些域名可能拿到污染答案；`dns` 段（远程 DoH、AAAA 置空）对这一层**不生效**，它是“写了但不在路径上”的策略。决策见 TODO 4.4：保持 A1（不做 `IPIfNonMatch`） |
+| **非代理应用的 IPv6** | catch-all 规则只在 xray 的路由里 | 这类应用直连 IPv6，成败取决于线路，不受 `::/0 → block` 约束 |
+| **国内 IPv6 被全局压掉** | `/etc/gai.conf` 让 glibc 程序优先 IPv4（`getent ahosts` 已验证顺序）；Chromium 自带解析器、Go 不读 gai.conf，所以**只影响不走代理的 glibc 程序** | 这批程序无法用国内 IPv6；换来的是“非代理应用不会先撞被墙的 IPv6 再挂起”。2026-11-09 评估：保留，见 TODO 4.5 |
+| **单节点、单服务器** | 只有 `proxy` 一个自建节点 | 服务器被封只能 `off` 后直连，没有自动切换 |
+| **tailnet 单路径** | Telegram 经 `proxy-ts`（Tailscale） | Tailscale/DERP 中断时 Telegram 断，其余流量正常；`vpnctl status` 的 `egress` 行会显示 `fail`（2026-11-09 起） |
+| **per-app 分流** | Linux 桌面端 Tailscale 无官方 per-app 分流，本方案也未做 | 只能整机分流，不能按程序 |
+| **健康检查的时延** | `vpn-health.timer` 每 3 分钟一轮 | 故障最长约 3 分钟才被发现，期间的连接由应用自己报错 |
+
 ---
 
 ## 12. 已确认事项与待确认问题
@@ -687,6 +718,7 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 
 ## 13. 变更记录
 
+- 2026-11-09：加固（依据 TODO 4.1–4.3）。改动：① IPv6 拦截由五个手写前缀改为一条 `ip: ["::/0"] → block`，位置在直连规则之后、代理与 Telegram 规则之前（实测 IPv6 字面量由挂起变为 8 ms 失败）；② `policy_ok` 支持多个 VLESS 出站（并要求每个都是 REALITY + Vision），修掉 2026-11-05 以来 `validate` 一直拒绝真实配置的缺陷；③ 新增诊断入站 `127.0.0.1:10809`（tag `ts-in`）与首条路由，`vpnctl check` 增加 tailnet 出口探针，`status` 增加 `egress` 行；④ 新增 `geo-manifest.py` 与 `vpnctl geo-manifest`，`validate` 会点名不存在的 `geosite:`/`geoip:` 代码；⑤ `test_vpnctl.sh` 增加 T17–T21（geo 清单、IPv6 守卫、多 VLESS、路由真值表、tailnet 探针），42 → 59 项；⑥ 新增 §11.1“不保护什么”；⑦ 用临时实例 + access log 实测 DNS 路径（`dns-module` 0 次、目标以域名记录），决策 A1：不启用 `IPIfNonMatch`；⑧ 评估 `gai.conf`：只影响不走代理的 glibc 程序，保留。原因：对照 sing-box 配置生成器的设计，补齐“每个出口各自自检”“规则顺序离线可验证”“显式写出不保护什么”三件事。验证：`test_vpnctl.sh` 59 项全过；实机 `vpnctl validate`/`check` 通过，见 TODO 4.1 验收。
 - 2026-10-24：创建设计稿（v0.1）。原因：用户决定从 v2rayN GUI 迁移到本地配置文件方案，要求先出设计并逐条处理已识别的风险。
 - 2026-10-24：升级到 v0.2。原因：用户要求“安全第一、禁止追最新、只选最近稳定版并做投毒核查”。改动：更新策略改为“满 30 天冷却的最近稳定版”；新增供应链核查清单、`--sha256/--released/--source` 强制参数与证据文件；移除从 v2rayN 内核升级的路径（只保留为基线）；geo 告警 180→90 天；失败通知改为同轮 5 秒重试、首轮失败即通知；确认默认不自动关代理、不做联网版本检查。
 - 2026-10-24：升级到 v0.3。原因：用户确认冷却期改为 60 天、首次安装改用官方 release 内核。改动：`UPGRADE_MIN_AGE_DAYS` 默认 30→60；`install` 不再默认复制 v2rayN 内核，改为强制 `--xray` + `--xray-sha256`；新增基线证据文件与“同版本换来源”的 60 天例外；待确认项收敛为 v2rayN 自启动与卸载时间。
