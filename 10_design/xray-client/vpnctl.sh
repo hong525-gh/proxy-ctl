@@ -38,6 +38,11 @@ readonly IPV6_HANG_MS=3000
 # Telegram was down. A second mixed inbound that only routes to `proxy-ts` makes that path
 # testable without touching the main one.
 readonly TS_PORT="${TS_PORT:-10809}"
+# The health probe must travel the tunnel it claims to test. `www.gstatic.com` is matched by
+# `geosite:cn` in the current database and went out DIRECT — so a dead tunnel still produced
+# a 204 (journal: "//www.gstatic.com:443 [socks -> direct]"). A second diagnostic inbound
+# pinned to `proxy` removes that dependency on list membership.
+readonly PROBE_PORT="${PROBE_PORT:-10810}"
 readonly TS_PROBE_URL="${TS_PROBE_URL:-https://api.telegram.org/}"
 readonly TS_MAX_TIME="${TS_MAX_TIME:-8}"
 
@@ -189,7 +194,7 @@ probe_http() {
   code=$(env -u http_proxy -u https_proxy -u all_proxy \
               -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
               curl -s -o /dev/null -w '%{http_code}' \
-              --noproxy '' -x "http://$PROXY_HOST:$PORT" \
+              --noproxy '' -x "http://$PROXY_HOST:$(health_port)" \
               -m 8 "$HEALTH_URL" 2>/dev/null) || return 1
   [[ $code == 204 ]]
 }
@@ -241,7 +246,7 @@ probe_kbps() {
   local bytes
   bytes=$(env -u http_proxy -u https_proxy -u all_proxy \
                -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-               curl -s -o /dev/null --noproxy '' -x "http://$PROXY_HOST:$PORT" \
+               curl -s -o /dev/null --noproxy '' -x "http://$PROXY_HOST:$(health_port)" \
                -m "$TP_MAX_TIME" -w '%{speed_download}' "$url" 2>/dev/null) || bytes=0
   [[ $bytes =~ ^[0-9]+$ ]] || bytes=0
   printf '%s' $(( bytes / 1024 ))
@@ -249,6 +254,18 @@ probe_kbps() {
 
 has_global_ipv6() {
   ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 '
+}
+
+# Is the diagnostic inbound that is pinned to `proxy` configured?
+probe_inbound_present() {
+  [[ -f $CONFIG_FILE ]] || return 1
+  jq -e 'any(.inbounds[]?; .tag == "probe-in")' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+# Which port the health probe should use: the pinned one when the config has it, otherwise
+# the user-facing port (older configs, and the tests for the fallback).
+health_port() {
+  if probe_inbound_present; then printf '%s' "$PROBE_PORT"; else printf '%s' "$PORT"; fi
 }
 
 # Is the diagnostic inbound for the tailnet egress configured?
@@ -289,7 +306,7 @@ probe_ts_with_retry() {
 query_exit_ip() {
   env -u http_proxy -u https_proxy -u all_proxy \
       -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-      curl -s --noproxy '' -x "http://$PROXY_HOST:$PORT" \
+      curl -s --noproxy '' -x "http://$PROXY_HOST:$(health_port)" \
       -m 8 https://api.ipify.org 2>/dev/null || true
 }
 
@@ -380,10 +397,13 @@ policy_ok() {
     and ([.inbounds[] | select(.protocol == "mixed" and (.port|tostring) == "10808")] | length) == 1
     and ([.inbounds[] | select((.port|tostring) == "10808")][0].listen) == "127.0.0.1"
     and ([.inbounds[] | select(.listen == "0.0.0.0")] | length) == 0
-    and ([.inbounds[] | select(.tag != "ts-in" and .listen != "127.0.0.1")] | length) == 0
+    and ([.inbounds[] | select(.tag != "ts-in" and .tag != "probe-in" and .listen != "127.0.0.1")] | length) == 0
+    and ([.inbounds[] | select(.tag == "probe-in" and (.protocol != "mixed" or (.port|tostring) != "10810" or .listen != "127.0.0.1"))] | length) == 0
     and ([.inbounds[] | select(.tag == "ts-in" and (.protocol != "mixed" or (.port|tostring) != "10809" or .listen != "127.0.0.1"))] | length) == 0
     and ([.routing.rules[]? | select((.inboundTag // []) | index("ts-in"))] | length)
         == ([.inbounds[] | select(.tag == "ts-in")] | length)
+    and ([.routing.rules[]? | select((.inboundTag // []) | index("probe-in"))] | length)
+        == ([.inbounds[] | select(.tag == "probe-in")] | length)
     and ([.outbounds[] | select(.protocol == "vless")] | length) >= 1
     and ([.outbounds[]
           | select(.protocol == "vless")
@@ -405,6 +425,8 @@ policy_diag() {
     vless: ([.outbounds[] | select(.protocol == "vless")] | length),
     ts_in: ([.inbounds[] | select(.tag == "ts-in")] | length),
     ts_rule: ([.routing.rules[]? | select((.inboundTag // []) | index("ts-in"))] | length),
+    probe_in: ([.inbounds[] | select(.tag == "probe-in")] | length),
+    probe_rule: ([.routing.rules[]? | select((.inboundTag // []) | index("probe-in"))] | length),
     vless_tags: [.outbounds[] | select(.protocol == "vless") | .tag],
     vless_bad: [.outbounds[]
                 | select(.protocol == "vless")
@@ -722,6 +744,11 @@ cmd_status() {
     say "guard   : IPv6 → block for proxied destinations (exit has no IPv6)"
   else
     say "guard   : absent — IPv6 literals can hang on the proxy path; add the ::/0 block rule"
+  fi
+  if probe_inbound_present; then
+    say "probe   : pinned to proxy via 127.0.0.1:$PROBE_PORT"
+  else
+    say "probe   : via 127.0.0.1:$PORT (not pinned — the probe may follow a rule to direct)"
   fi
   say "egress  : telegram via proxy-ts: $ts_state (http $ts_code, ${ts_ms} ms)"
   say "speed   : cf ${tp_cf} KB/s · ref ${tp_ref} KB/s (${tp_state}, min ${TP_MIN_KBPS})"

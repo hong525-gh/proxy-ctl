@@ -230,10 +230,13 @@ jq -e '
   and ([.inbounds[] | select(.protocol == "mixed" and (.port|tostring) == "10808")] | length) == 1
   and ([.inbounds[] | select((.port|tostring) == "10808")][0].listen) == "127.0.0.1"
   and ([.inbounds[] | select(.listen == "0.0.0.0")] | length) == 0
-  and ([.inbounds[] | select(.tag != "ts-in" and .listen != "127.0.0.1")] | length) == 0
+  and ([.inbounds[] | select(.tag != "ts-in" and .tag != "probe-in" and .listen != "127.0.0.1")] | length) == 0
+  and ([.inbounds[] | select(.tag == "probe-in" and (.protocol != "mixed" or (.port|tostring) != "10810" or .listen != "127.0.0.1"))] | length) == 0
   and ([.inbounds[] | select(.tag == "ts-in" and (.protocol != "mixed" or (.port|tostring) != "10809" or .listen != "127.0.0.1"))] | length) == 0
   and ([.routing.rules[]? | select((.inboundTag // []) | index("ts-in"))] | length)
       == ([.inbounds[] | select(.tag == "ts-in")] | length)
+  and ([.routing.rules[]? | select((.inboundTag // []) | index("probe-in"))] | length)
+      == ([.inbounds[] | select(.tag == "probe-in")] | length)
   and ([.outbounds[] | select(.protocol == "vless")] | length) >= 1
   and ([.outbounds[]
         | select(.protocol == "vless")
@@ -260,6 +263,13 @@ jq -e '
 把 `ts_state`/`ts_ms`/`ts_code` 写进 `health.json`；`status` 的 `egress` 行显示结果。
 **这条探针失败不会把整体健康判为 fail**（否则 `AUTO_OFF` 会因为 Telegram 一条路断了
 而关掉全部代理），只在 `status` 里给出 warn。
+
+**探针入站 `probe-in`（2026-11-09，同 4.6）**：`127.0.0.1:10810`，mixed，路由
+`inboundTag: ["probe-in"] → proxy`。起因是执行 4.1 时发现：204 探针目标
+`www.gstatic.com` 在当前 `geosite.dat` 里被 `geosite:cn` 命中，journal 显示
+`[socks -> direct]` —— **隧道挂了探针照样 204**。健康检查的 204、出口 IP、测速自此
+都走 10810；配置里没有 `probe-in` 时回退到 10808（老配置与测试的回退路径）。
+`status` 用 `probe` 行显示当前是“固定”还是“未固定”。
 
 **geo 代码清单（2026-11-09）**：`geo-manifest.py` 用最小 protobuf 读取器列出
 `geosite.dat` / `geoip.dat` 里真实存在的代码，结果写在
@@ -718,7 +728,7 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 
 ## 13. 变更记录
 
-- 2026-11-09：加固（依据 TODO 4.1–4.3）。改动：① IPv6 拦截由五个手写前缀改为一条 `ip: ["::/0"] → block`，位置在直连规则之后、代理与 Telegram 规则之前（实测 IPv6 字面量由挂起变为 8 ms 失败）；② `policy_ok` 支持多个 VLESS 出站（并要求每个都是 REALITY + Vision），修掉 2026-11-05 以来 `validate` 一直拒绝真实配置的缺陷；③ 新增诊断入站 `127.0.0.1:10809`（tag `ts-in`）与首条路由，`vpnctl check` 增加 tailnet 出口探针，`status` 增加 `egress` 行；④ 新增 `geo-manifest.py` 与 `vpnctl geo-manifest`，`validate` 会点名不存在的 `geosite:`/`geoip:` 代码；⑤ `test_vpnctl.sh` 增加 T17–T21（geo 清单、IPv6 守卫、多 VLESS、路由真值表、tailnet 探针），42 → 59 项；⑥ 新增 §11.1“不保护什么”；⑦ 用临时实例 + access log 实测 DNS 路径（`dns-module` 0 次、目标以域名记录），决策 A1：不启用 `IPIfNonMatch`；⑧ 评估 `gai.conf`：只影响不走代理的 glibc 程序，保留。原因：对照 sing-box 配置生成器的设计，补齐“每个出口各自自检”“规则顺序离线可验证”“显式写出不保护什么”三件事。验证：`test_vpnctl.sh` 59 项全过；实机 `vpnctl validate`/`check` 通过，见 TODO 4.1 验收。
+- 2026-11-09：加固（依据 TODO 4.1–4.3）。改动：① IPv6 拦截由五个手写前缀改为一条 `ip: ["::/0"] → block`，位置在直连规则之后、代理与 Telegram 规则之前（实测 IPv6 字面量由挂起变为 8 ms 失败）；② `policy_ok` 支持多个 VLESS 出站（并要求每个都是 REALITY + Vision），修掉 2026-11-05 以来 `validate` 一直拒绝真实配置的缺陷；③ 新增诊断入站 `127.0.0.1:10809`（tag `ts-in`）与首条路由，`vpnctl check` 增加 tailnet 出口探针，`status` 增加 `egress` 行；④ 新增 `geo-manifest.py` 与 `vpnctl geo-manifest`，`validate` 会点名不存在的 `geosite:`/`geoip:` 代码；⑤ `test_vpnctl.sh` 增加 T17–T21（geo 清单、IPv6 守卫、多 VLESS、路由真值表、tailnet 探针），42 → 59 项；⑥ 新增 §11.1“不保护什么”；⑦ 新增 `probe-in`（127.0.0.1:10810）并把 204/出口 IP/测速固定到 `proxy`，修掉“探针被 `geosite:cn` 命中而走直连”的假绿问题；⑧ 用临时实例 + access log 实测 DNS 路径（`dns-module` 0 次、目标以域名记录），决策 A1：不启用 `IPIfNonMatch`；⑨ 评估 `gai.conf`：只影响不走代理的 glibc 程序，保留。原因：对照 sing-box 配置生成器的设计，补齐“每个出口各自自检”“规则顺序离线可验证”“显式写出不保护什么”三件事。验证：`test_vpnctl.sh` 59 项全过；实机 `vpnctl validate`/`check` 通过，见 TODO 4.1 验收。
 - 2026-10-24：创建设计稿（v0.1）。原因：用户决定从 v2rayN GUI 迁移到本地配置文件方案，要求先出设计并逐条处理已识别的风险。
 - 2026-10-24：升级到 v0.2。原因：用户要求“安全第一、禁止追最新、只选最近稳定版并做投毒核查”。改动：更新策略改为“满 30 天冷却的最近稳定版”；新增供应链核查清单、`--sha256/--released/--source` 强制参数与证据文件；移除从 v2rayN 内核升级的路径（只保留为基线）；geo 告警 180→90 天；失败通知改为同轮 5 秒重试、首轮失败即通知；确认默认不自动关代理、不做联网版本检查。
 - 2026-10-24：升级到 v0.3。原因：用户确认冷却期改为 60 天、首次安装改用官方 release 内核。改动：`UPGRADE_MIN_AGE_DAYS` 默认 30→60；`install` 不再默认复制 v2rayN 内核，改为强制 `--xray` + `--xray-sha256`；新增基线证据文件与“同版本换来源”的 60 天例外；待确认项收敛为 v2rayN 自启动与卸载时间。

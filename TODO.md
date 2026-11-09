@@ -236,7 +236,19 @@ vpnctl check    # 期望 ipv6 : ok；status 的 guard 行应显示 absent
   EOF 的场景；代价（国内双栈站点不走 IPv6）只落在同一批 glibc 程序上，范围比原先估计的小。
   原计划“撤掉它换国内 IPv6”收益不成立，故不执行。
 
-### 4.6 [ ] 可观测性：Xray `api` + `stats`（暂缓）
+### 4.6 [x] 健康探针必须走它声称测试的那条路（2026-11-09 执行 4.1 时发现）
+
+- **内容**：`vpnctl check` 的 204 探针目标 `https://www.gstatic.com/generate_204` 被 `geosite:cn` 命中，**实际走的是 `direct`**；也就是说隧道挂了、探针照样返回 204（日志实证：`//www.gstatic.com:443 [socks -> direct]`）。修法：新增 `127.0.0.1:10810` 的诊断入站 `probe-in`，路由首条固定 `inboundTag: probe-in → proxy`，204 探针、出口 IP、测速全部改走 10810（配置里没有 `probe-in` 时回退到 10808）。
+- **依据**：与 4.1 同一条原则——“让这个出口工作的流量，必须在这个出口上验证”。`geosite.dat` 的分类会变，任何“靠域名分类碰巧走代理”的探针都是不可靠的。
+- **实现方法**：配置加入站 + 首条路由；`policy_ok` 允许并按同样规则校验 `probe-in` 与它的路由配对；`vpnctl` 增加 `health_port()`；`status` 显示探针是否已固定；测试覆盖“有 probe-in / 没有 probe-in 回退 / 端口写错被拒”。
+- **验证**：journal 出现 `[probe-in -> proxy]`；临时把服务停掉（或 `vpnctl off`）时探针必须失败而不是 204。
+- **回滚**：删除 `probe-in` 入站与路由；配置备份见 `~/.local/state/vpn/backups/`。
+- **实施记录（2026-11-09）**：配置备份 `config-20261109-105305.json`；实机验证 journal 出现
+  `//www.gstatic.com:443 [probe-in -> proxy]`、`//api.ipify.org:443 [probe-in -> proxy]`、
+  测速 `[probe-in -> proxy]`；`status` 显示 `probe   : pinned to proxy via 127.0.0.1:10810`。
+  测试 T22 覆盖“固定 / 回退 10808 / 端口写错被拒”，总数 59 → 63。
+
+### 4.7 [ ] 可观测性：Xray `api` + `stats`（暂缓）
 
 - **内容**：在 `127.0.0.1` 开 Xray 统计接口，让 `vpnctl` 能回答“多少流量走了 `proxy-ts` / `proxy`”。
 - **依据**：项目可选 Clash API 观察连接走向；我们目前只能靠 `ss` 猜。
