@@ -1,0 +1,11 @@
+# Generated guides: they embed the live node parameters (UUID, REALITY keys, SNI, IPs)
+# and must never enter git history. See 10_design/xray-client/design.md 6.7.
+*.html
+
+# Local backups made before an edit (vpnctl.sh.bak-*, config.json.bak-*, ...)
+*.bak-*
+*.bak.*
+
+# Editor / OS noise
+*.swp
+.DS_Store

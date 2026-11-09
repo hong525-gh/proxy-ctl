@@ -1,0 +1,17 @@
+[Unit]
+Description=Xray client (VLESS + REALITY), local-only inbound
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=XRAY_LOCATION_ASSET=%h/.local/share/xray
+ExecStart=%h/.local/bin/xray run -c %h/.config/xray/config.json
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=default.target
