@@ -258,32 +258,37 @@ vpnctl check    # 期望 ipv6 : ok；status 的 guard 行应显示 absent
 
 ---
 
-## 待办 5：删除 `ts.net` 的 Split DNS（指向 199.247.155.53）
+## 待办 5：`ts.net → 199.247.155.53` 的归属（结论：无法也不需要删除）
 
-**状态**：待你在 Tailscale 后台操作（我没有后台权限）
+**状态**：已关闭（2026-11-09，用 Tailscale API 核实）
 **建立日期**：2026-11-09
 
-### What
+### 结论
 
-删除 `ts.net → 199.247.155.53` 这条**受限解析器（restricted nameserver，旧称 Split DNS）**，保留 MagicDNS 与全局解析器 `100.118.65.105`。
+这条记录**不是**用户添加的 Split DNS，而是 **Tailscale 自己下发的**：它是 `ts.net` 域名的公网权威服务器
+（DNSimple，IPv4 `199.247.155.53` + IPv6 `2620:111:8007::53` 两条一起出现），随 MagicDNS 一起下发给每台设备，
+并且在设备使用 exit node 时由 `ExitNodeFilteredSet`（含 `.ts.net`、`.tailscale.net`）排除，不会把 MagicDNS 名字送进隧道。
+所以后台里找不到它、也没有可删的条目。
 
-> 路径按 2026-11-09 的现行后台：**https://console.tailscale.com/admin/dns**（旧的 `login.tailscale.com/admin/dns` 仍可打开，但界面已迁移；页面上也没有叫 “Split DNS” 的分区了，对应概念现在叫 **Restricted nameservers / 受限解析器**）。在该页搜索 `199.247` 即可定位到那一行，行尾 `⋯` → Remove。
+### 证据（2026-11-09）
 
-### Why
+| 检查 | 结果 |
+|---|---|
+| `GET /api/v2/tailnet/-/dns/split-dns` | `{}`（用户没有配置任何受限解析器） |
+| `GET /api/v2/tailnet/-/dns/config` | `resolvers: [100.118.65.105]`、`routes: null`、`domains: null`、`proxied: true` |
+| `tailscale dns status --json`（Fedora 与 VPS 一致） | `SplitDNSRoutes: {"ts.net.": [199.247.155.53, 2620:111:8007::53]}`、`SearchDomains: ["tail61cf19.ts.net"]`、`ExitNodeFilteredSet: [".ts.net", ".tailscale.net"]` |
 
-- `199.247.155.53` 是 **DNSimple（美国）**，是 `ts.net` 的公网权威服务器；它**不返回 tailnet 内部设备名**（实测 `vm-z4ziutm3.tail61cf19.ts.net` 返回空，而 `100.100.100.100` 能返回 `100.118.65.105`）。
-- Split DNS 优先级高于 MagicDNS，所以它会**抢走所有 `*.ts.net` 查询**，让设备名解析失败。
-- 它还给每台设备多加一个必须可达的境外解析器；客户端健康检查把它算在内，是 `dns-forward-failing` 的另一来源（本次平板的根因是客户端版本，但这条仍在）。
-- 补充（2026-11-09 查官方文档后确认）：**设备使用 exit node 时，Tailscale 默认把 exit node 当作所有域名的解析器，不受全局/受限解析器配置影响**。这解释了抓包里为什么看不到发往 `100.118.65.105:53` 的查询——平板当时的 DNS 由出口节点代答，而不是直连 dnsproxy。因此这条 split 配置对“开了出口节点的设备”基本不生效，删除主要是给**不走出口节点**的设备恢复 MagicDNS。
+API 里 `domains: null` 而客户端有 `SearchDomains: tail61cf19.ts.net`——两者对比说明：**API 反映的是“用户配置”，
+客户端拿到的是“用户配置 + MagicDNS 自动条目”**。`ts.net` 的路由和搜索域都属于后者。
 
-### How
+### 影响
 
-后台 → DNS → Split DNS → 删除 `ts.net` → Save；各设备断开重连一次。验证：`dig @100.100.100.100 vm-z4ziutm3.tail61cf19.ts.net` 与设备名解析恢复正常；客户端不再出现该警告。
+- 设备名（`*.tail61cf19.ts.net`）由 MagicDNS 在本地解析，`100.100.100.100` 能返回正确地址；这条路由只服务**非设备**的
+  `*.ts.net` 名字（跨 tailnet 解析），属正常设计。
+- 退出节点场景下它被过滤，不参与解析。
 
-### 回滚
+### 如果当初确实在后台加过
 
-重新添加 `ts.net → 199.247.155.53` 即可（原值已记录在此）。
+那它已经被删掉或从未保存成功；当前 API 显示用户配置为空，后台 `console.tailscale.com/admin/dns` 里也不会有可删的行。
+**不需要再做任何操作。**
 
-### 备注
-
-这条规则最初是为排查“手机/平板开代理后 X（推特）打不开、Telegram 正常”加的，但那个现象的真实原因与 `ts.net` 解析无关（2026-11-09 已定位为平板 Tailscale 版本问题，见 `10_design/vps-tailscale-exit-node.md` §6.7）。
