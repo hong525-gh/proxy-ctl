@@ -288,10 +288,46 @@ journalctl --user -u xray-client -f | grep accepted   # Telegram -> proxy-ts，G
 - Tailscale 目前走 **DERP(hkg) 中继**（`tailscale ping` 显示 `via DERP(hkg)`，非直连 UDP）。若 DERP 或控制面不可用，Telegram 流量会一起断，其余流量不受影响；需要自动回退时可加 Xray `observatory` + `balancer`（`fallbackTag: proxy`），当前未启用。
 - 回滚：`cp ~/.config/xray/config.json.bak-20261105 ~/.config/xray/config.json && systemctl --user restart xray-client.service`。
 
+## 6.7 2026-11-09 平板 DNS 失效：客户端版本，不是服务器
+
+**症状**：平板（OPPO Pad Mini，Android 16 / ColorOS 16）连上 Tailscale 后弹出
+`dns-forward-failing: DNS unavailable / Tailscale can't reach the configured DNS servers`；
+浏览器打不开 Google 与 X（推特），但 Telegram 正常；通过 tailnet 的 `100.105.202.118:3080`
+访问 dsh 正常。手机（同一 tailnet、同一 exit node）一切正常。
+
+**排查过程**：
+
+1. 服务器侧先排除：`dnsproxy` 自 2026-10-29 起零重启、监听 `100.118.65.105:53`、UDP/TCP 均可查，
+   从 VPS 本机与从 Fedora 经 tailnet 都能毫秒级解析出干净结果；VPS 与 Fedora 的
+   `tailscale status --json` 里 `Health` 均为空。
+2. exit node 转发规则核对：`net.ipv4.ip_forward=1`；`FORWARD` 首条为 `-j ts-forward`，
+   内含 `-i tailscale0 … MARK` + `ACCEPT`；`POSTROUTING` 首条为 `-j ts-postrouting`，
+   内含 `MARK … MASQUERADE`；ufw 默认 `deny (routed)` 但 `ts-*` 链先于 `ufw-*` 链执行，
+   而且 `INPUT` 首条 `-j ts-input` 让 tailnet 流量（含 53 端口）先被接受。
+3. **抓包定性**（VPS 上 `tcpdump -ni tailscale0 "host <平板 tailnet IP>"`）：平板发往
+   `1.1.1.1:443` 的 SYN 9 个、SynAck 9 个、带数据包 89 个 —— 数据面经 exit node 完全正常；
+   但发往 `100.118.65.105:53` 的 DNS 包 **0 个**。
+4. 结论：包没出设备，是**客户端自己的 DNS 转发器**没把查询送进隧道。
+
+**根因**：平板 Tailscale **1.102.3** 在 **Android 16** 上 DNS 转发器失效（数据面正常、
+DNS 面不工作）。升级到应用商店最新版后立刻恢复。
+
+**预防**：
+
+- 移动端 Tailscale 与桌面/VPS 保持同一版本线（当时桌面 1.104.5、VPS 1.104.4、平板 1.102.3）。
+- 遇到“IP 能通、域名不通 + `dns-forward-failing`”时，先看客户端版本，再抓包确认 DNS 是否离开设备；
+  不要先怀疑服务器 —— 本次服务器完全无辜。
+- 抓包是判定“设备侧 / 服务器侧”的最快手段：看发往解析器的 53 端口包存不存在，一眼定性。
+
+**清理**：抓包进程已停止，`/tmp/pad-cap.log` 已删除；VPS 上未留下临时文件。
+
+---
+
 ## 7. 变更记录
 
 | 日期 | 改动 | 原因 |
 |------|------|------|
+| 2026-11-09 | 记录 §6.7：平板 DNS 失效的排查与根因（Tailscale Android 1.102.3 在 Android 16 上 DNS 转发器失效，升级后恢复）；未改动任何服务器配置 | 平板报 `dns-forward-failing` 且只有浏览器失败。抓包证明 exit node 数据面正常（9 次握手/89 个数据包）、发往解析器的 DNS 包为 0，定位到客户端；升级即修复。顺带留下“先看 53 端口包是否存在”的定性方法 |
 | 2026-11-09 | Fedora 客户端 IPv6 拦截由五个手写前缀改为一条策略规则 `ip: ["::/0"] → block`，位置在直连（private / 国内 IP / DNS 服务器 / 国内域名 / DNS 模块直连）之后、代理与 Telegram 规则之前；配置备份 `~/.local/state/vpn/backups/config-20261109-101803.json` | 前缀清单必然漏项：Cloudflare `2606:4700::/32` 不在原五个前缀里，实测其 IPv6 字面量经代理挂起；改为 catch-all 后 8 ms 失败并回落 IPv4，国内/内网 IPv6 仍直连（规则顺序保证）。来源：sing-box 配置生成器把 IPv6 当策略而非黑名单 |
 | 2026-11-09 | vpnctl 新增 `geo-manifest`（`geo-manifest.py` 读 `geosite.dat`/`geoip.dat` 的代码清单），`validate` 在 xray `-test` 失败时点名不存在的代码；同时修 policy 断言：VLESS 出站由 `== 1` 改为 `>= 1` 且每个都必须是 REALITY + Vision | ① 11-04 事故（`geosite:office` 不存在 → 服务起不来）：现在失败信息直接点出代码；② 11-05 加入 `proxy-ts` 后配置有两个 VLESS 出站，而断言要求“恰好一个”，从那天起 `validate` 一直拒绝真实配置，连带 `restart`/`edit`/`install` 全部不可用（本次才发现）。离线测试 42 → 51 项 |
 | 2026-11-09 | proxy-ctl：`no_proxy` 改为每次开终端读 GNOME `ignore-hosts`，只追加本机例外（`.local` + kimi 域名）；新增 `test_proxy.sh`（10 项，离线）；commit `5503857` 已推送 | `DESIGN.md` 声称“复用 ignore-hosts”，脚本却硬编码了另一份（GNOME 3 项、脚本 8 项）——文档与实现分叉，例外清单散在三处；改为单一来源 |
