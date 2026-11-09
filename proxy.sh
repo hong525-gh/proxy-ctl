@@ -23,20 +23,46 @@ _pc_clear() {
 }
 
 _pc_apply() {
-    # 参数：$1=host  $2=port
+    # 参数：$1=host  $2=port  $3=GNOME ignore-hosts（逗号分隔，可空）
     # xray 10808 是 HTTP+SOCKS 混合入站，故三类协议可指向同一 endpoint。
     local url="http://$1:$2"
     local socks="socks5://$1:$2"
-    # 2026-11-06: kimi.com 加入 no_proxy —— dsh 调 Kimi 走本地 xray 跳频繁被 RST
-    # （晚高峰约半数请求 3-11 秒内 Connection error），国内端点本就该直连。
-    # 同日补显式子域名（api/code/auth/telemetry-logs），兼容不做后缀匹配的
-    # no_proxy 实现（部分 Node/Go HTTP 客户端只认全等或前导点）。
-    # A/B 实验：若 1-2 天内晚高峰不再出现，则元凶是本地 xray 跳，此改动保留。
-    local ignore="localhost,127.0.0.0/8,::1,.local,kimi.com,.kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com"
+    # no_proxy 的唯一来源是 GNOME 的 ignore-hosts（2026-11-09 起，之前这里硬编码了
+    # 一份与系统设置不同的列表，DESIGN.md 却写着“复用 ignore-hosts”，文档与实现分叉）。
+    # 只在上面追加本机才知道的例外：kimi.com 相关域名 —— dsh 调 Kimi 走本地 xray 跳
+    # 频繁被 RST（晚高峰约半数请求 3-11 秒内 Connection error），国内端点本就该直连。
+    # 显式子域名是为了兼容不做后缀匹配的 no_proxy 实现（部分 Node/Go 客户端只认全等
+    # 或前导点）。.local 是 mDNS 局域网名，GNOME 的 ignore-hosts 不覆盖它，本地才知道。
+    local ignore="$3"
+    local extra=".local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com"
+    if [[ -n "$ignore" ]]; then
+        ignore="$ignore,$extra"
+    else
+        ignore=".local,$extra"
+    fi
     export http_proxy="$url"    HTTP_PROXY="$url"
     export https_proxy="$url"   HTTPS_PROXY="$url"
     export all_proxy="$socks"   ALL_PROXY="$socks"
     export no_proxy="$ignore"   NO_PROXY="$ignore"
+}
+
+_pc_gnome_ignore() {
+    # 读 GNOME 的 ignore-hosts，输出逗号分隔；读不到时输出空串。
+    # gsettings 返回形如 ['localhost', '127.0.0.0/8', '::1']。
+    local raw item out=()
+    raw=$(gsettings get org.gnome.system.proxy ignore-hosts 2>/dev/null) || return 0
+    raw=${raw#[}
+    raw=${raw%]}
+    local IFS=','
+    for item in $raw; do
+        item=${item//[\[\]\'\" ]/}
+        [[ -n "$item" ]] && out+=("$item")
+    done
+    local joined=""
+    for item in "${out[@]}"; do
+        joined+="${joined:+,}$item"
+    done
+    printf '%s' "$joined"
 }
 
 _pc_warn() {
@@ -46,7 +72,7 @@ _pc_warn() {
 
 _pc_sync() {
     # 主流程：读 gsettings → 校验 → 探测端口 → apply / clear。
-    local mode host port
+    local mode host port ignore
 
     # gsettings 不存在（例如异常环境）→ 直接清并退出
     command -v gsettings >/dev/null 2>&1 || { _pc_clear; return 0; }
@@ -73,7 +99,8 @@ _pc_sync() {
     # 打开成功即可，随后立刻关闭该 FD。
     if (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
         exec 3<&- 3>&-
-        _pc_apply "$host" "$port"
+        ignore=$(_pc_gnome_ignore)
+        _pc_apply "$host" "$port" "$ignore"
     else
         _pc_clear
         _pc_warn "系统代理已开启，但 ${host}:${port} 不可通（v2rayN 是否在运行？）"

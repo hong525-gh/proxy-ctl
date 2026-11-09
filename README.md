@@ -11,7 +11,9 @@ Every time you open a new interactive Bash shell, `proxy.sh`:
 1. Reads GNOME's system proxy state via `gsettings`.
 2. If it's `manual` **and** the configured host:port is reachable,
    exports `http_proxy` / `https_proxy` / `all_proxy` (+ uppercase
-   variants) and `no_proxy`.
+   variants) and `no_proxy`. `no_proxy` is built from GNOME's
+   `ignore-hosts`, with only the local exceptions appended (`.local`
+   and the kimi.com names).
 3. Otherwise, unsets all of them so the shell goes direct.
 4. Only prints anything (to `stderr`) when the state is anomalous —
    e.g. system proxy is on but the port is dead.
@@ -56,19 +58,31 @@ https_proxy=http://127.0.0.1:10808
 HTTPS_PROXY=http://127.0.0.1:10808
 all_proxy=socks5://127.0.0.1:10808
 ALL_PROXY=socks5://127.0.0.1:10808
-no_proxy=localhost,127.0.0.0/8,::1,.local
-NO_PROXY=localhost,127.0.0.0/8,::1,.local
+no_proxy=localhost,127.0.0.0/8,::1,.local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com
+NO_PROXY=localhost,127.0.0.0/8,::1,.local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com
 ```
 
 Turn off system proxy in GNOME Settings → open a fresh terminal →
 all of the above should be gone.
 
+## Tests
+
+```bash
+$ bash test_proxy.sh
+```
+
+Offline: `gsettings` is mocked and the "xray port" is a throwaway
+listener, so nothing real is touched. Covers the three behaviours
+above plus "`no_proxy` really follows `ignore-hosts`" and
+"non-interactive shells are untouched".
+
 ## Documents
 
 - [DESIGN.md](DESIGN.md) — full design document (requirements,
   architecture, non-goals, scenario handling).
-- [proxy.sh](proxy.sh) — the script itself, ~80 lines of annotated
+- [proxy.sh](proxy.sh) — the script itself, ~110 lines of annotated
   Bash.
+- [test_proxy.sh](test_proxy.sh) — offline acceptance tests.
 
 ## License
 

@@ -187,15 +187,45 @@ exec 3<&- 3>&-
 
 xray 在 10808 是 HTTP+SOCKS 混合入站，因此三类变量都可以指向同一 endpoint。
 
+`no_proxy` 只有一个来源：GNOME 的 `ignore-hosts`（每次开终端现读），只在后面追加
+本机才知道的例外（kimi 相关域名）。2026-11-09 之前这里硬编码了一份与系统设置不同的
+列表，而本文却写着“复用 ignore-hosts”，是文档与实现分叉的实例。
+
 ```bash
 _pc_apply() {
-    local url="http://$_pc_host:$_pc_port"
-    local socks="socks5://$_pc_host:$_pc_port"
-    export http_proxy="$url"  HTTP_PROXY="$url"
-    export https_proxy="$url" HTTPS_PROXY="$url"
-    export all_proxy="$socks" ALL_PROXY="$socks"
-    export no_proxy="localhost,127.0.0.0/8,::1,.local,kimi.com,.kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com"
-    export NO_PROXY="$no_proxy"
+    # 参数：$1=host  $2=port  $3=GNOME ignore-hosts（逗号分隔，可空）
+    local url="http://$1:$2"
+    local socks="socks5://$1:$2"
+    local ignore="$3"
+    local extra=".local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com"
+    if [[ -n "$ignore" ]]; then
+        ignore="$ignore,$extra"
+    else
+        ignore=".local,$extra"
+    fi
+    export http_proxy="$url"    HTTP_PROXY="$url"
+    export https_proxy="$url"   HTTPS_PROXY="$url"
+    export all_proxy="$socks"   ALL_PROXY="$socks"
+    export no_proxy="$ignore"   NO_PROXY="$ignore"
+}
+
+_pc_gnome_ignore() {
+    # 读 GNOME 的 ignore-hosts，输出逗号分隔；读不到时输出空串。
+    # gsettings 返回形如 ['localhost', '127.0.0.0/8', '::1']。
+    local raw item out=()
+    raw=$(gsettings get org.gnome.system.proxy ignore-hosts 2>/dev/null) || return 0
+    raw=${raw#[}
+    raw=${raw%]}
+    local IFS=','
+    for item in $raw; do
+        item=${item//[\[\]\'\" ]/}
+        [[ -n "$item" ]] && out+=("$item")
+    done
+    local joined=""
+    for item in "${out[@]}"; do
+        joined+="${joined:+,}$item"
+    done
+    printf '%s' "$joined"
 }
 
 _pc_clear() {
@@ -207,7 +237,8 @@ _pc_clear() {
 ```
 
 - **必须同时 unset 大小写两套**。本机当前环境里就残留着 `HTTPS_PROXY=`（空串），是这个坑的现成证据。
-- `no_proxy` 复用 GNOME 已配置的 `ignore-hosts` 值，避免本机开发端口被误代理。
+- `no_proxy` 读 GNOME 的 `ignore-hosts`，因此“系统代理例外”只有一个事实来源；要加例外就改 GNOME 设置，不要改脚本。
+- 追加的 kimi 例外是**本机才知道的**事实（国内端点经本地 xray 跳会被 RST），写在 `_pc_apply` 一处。
 
 ---
 
