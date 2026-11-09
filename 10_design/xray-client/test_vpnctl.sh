@@ -169,6 +169,13 @@ make_config() {
       "port": 10809,
       "protocol": "mixed",
       "settings": {"auth": "noauth", "udp": false}
+    },
+    {
+      "tag": "probe-in",
+      "listen": "127.0.0.1",
+      "port": 10810,
+      "protocol": "mixed",
+      "settings": {"auth": "noauth", "udp": false}
     }
   ],
   "outbounds": [
@@ -229,6 +236,7 @@ make_config() {
     "domainStrategy": "AsIs",
     "rules": [
       {"type": "field", "inboundTag": ["ts-in"], "outboundTag": "proxy-ts"},
+      {"type": "field", "inboundTag": ["probe-in"], "outboundTag": "proxy"},
       {"type": "field", "port": "443", "network": "udp", "outboundTag": "block"},
       {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"},
       {"type": "field", "domain": ["geosite:private"], "outboundTag": "direct"},
@@ -594,7 +602,9 @@ cat > "$TMP/cases.json" <<'JSON'
   {"name": "dns module to DoH IPv4","target": "104.16.249.249",           "inbound": "dns-module", "port": 443, "expect": "proxy"},
   {"name": "dns module to DoH IPv6","target": "2606:4700::6810:f8f9",     "inbound": "dns-module", "port": 443, "expect": "proxy"},
   {"name": "direct-dns inbound",    "target": "223.5.5.5",                "inbound": "direct-dns-1", "port": 443, "expect": "direct"},
-  {"name": "ts-in egress",          "target": "api.telegram.org",         "inbound": "ts-in",   "port": 443, "expect": "proxy-ts"},
+  {"name": "ts-in egress",          "target": "api.telegram.org",         "inbound": "ts-in",     "port": 443, "expect": "proxy-ts"},
+  {"name": "probe-in egress",       "target": "example.org",              "inbound": "probe-in",  "port": 443, "expect": "proxy"},
+  {"name": "probe-in, CN domain",   "target": "www.baidu.com",            "tags": ["cn"], "inbound": "probe-in", "port": 443, "expect": "proxy"},
   {"name": "private IPv4",          "target": "192.168.0.1",              "tags": ["private"],  "port": 80,  "expect": "direct"},
   {"name": "foreign IPv4 literal",  "target": "1.1.1.1",                  "tags": [],           "port": 443, "expect": "proxy"}
 ]
@@ -766,6 +776,39 @@ else
 fi
 cp -p "$TMP/config-guard.json" "$HOME/.config/xray/config.json"
 printf '204' > "$MOCK/state/curl_code"
+
+# ---------------------------------------------------------------------------
+# T22: the health probe is pinned to `proxy`, not to whatever a rule says
+# ---------------------------------------------------------------------------
+
+run status
+if grep -q 'probe   : pinned to proxy via 127.0.0.1:10810' "$OUT"; then
+  ok "T22 status shows the probe is pinned"
+else
+  bad "T22 pinned probe not reported"
+fi
+
+jq 'del(.inbounds[] | select(.tag == "probe-in"))
+    | .routing.rules |= map(select(((.inboundTag // []) | index("probe-in")) == null))' \
+  "$HOME/.config/xray/config.json" > "$TMP/no-probe-in.json"
+install -m 600 "$TMP/no-probe-in.json" "$HOME/.config/xray/config.json"
+if expect_rc 0 validate; then ok "T22 a config without probe-in still validates"; else bad "T22 no-probe-in config rejected"; fi
+run status
+if grep -q 'probe   : via 127.0.0.1:10808 (not pinned' "$OUT"; then
+  ok "T22 without probe-in the probe falls back to 10808"
+else
+  bad "T22 fallback not reported"
+fi
+
+jq '(.inbounds[] | select(.tag == "probe-in") | .port) = 10811' \
+  "$TMP/config-guard.json" > "$TMP/bad-probe-in.json"
+if expect_rc 2 validate "$TMP/bad-probe-in.json"; then
+  ok "T22 a probe-in on the wrong port is rejected"
+else
+  bad "T22 probe-in on the wrong port accepted"
+fi
+
+install -m 600 "$TMP/config-guard.json" "$HOME/.config/xray/config.json"
 
 # ---------------------------------------------------------------------------
 # uninstall restores autostart

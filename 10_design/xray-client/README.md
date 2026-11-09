@@ -141,7 +141,15 @@ egress  : telegram via proxy-ts: ok (http 302, 210 ms)
 ```
 
 这条探针失败**不会**把整体健康判为 fail（否则 `AUTO_OFF` 会因为 Telegram 一条路断了
-关掉全部代理），只在 `status` 的 `warn` 里提示。手工验证某条流量走的是 tailnet：
+关掉全部代理），只在 `status` 的 `warn` 里提示。
+
+健康检查本身也走一个专门的入站：`127.0.0.1:10810`（tag `probe-in`），路由固定
+`inboundTag: probe-in → proxy`。原因是 2026-11-09 发现 204 探针目标
+`www.gstatic.com` 被 `geosite:cn` 命中、实际走了直连（journal 可见
+`[socks -> direct]`）——**隧道挂了探针仍然 204**。现在 204、出口 IP、测速三条探针
+都经 10810；配置里没有 `probe-in` 时自动回退到 10808，`status` 的 `probe` 行会标明。
+
+手工验证某条流量走的是 tailnet：
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -x http://127.0.0.1:10809 https://api.telegram.org/
