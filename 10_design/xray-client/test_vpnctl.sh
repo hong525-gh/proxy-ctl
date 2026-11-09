@@ -13,6 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
 export MOCK="$TMP/mock"
 export PATH="$MOCK/bin:$PATH"
+export TS_RETRY_WAIT=0   # keep the retry path cheap in tests
 mkdir -p "$HOME" "$MOCK/bin" "$MOCK/state"
 
 PASS=0
@@ -77,8 +78,20 @@ EOF
 cat > "$MOCK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 url="${*: -1}"
+proxy=""
+prev=""
+for a in "$@"; do
+  case $prev in -x) proxy=$a ;; esac
+  prev=$a
+done
 case $url in
   *api.ipify.org*) echo "203.0.113.7" ;;
+  *api.telegram.org*)
+    if [[ $proxy == *:10809 ]]; then
+      cat "$MOCK/state/curl_ts_code" 2>/dev/null || printf '302'
+    else
+      printf '000'
+    fi ;;
   *) cat "$MOCK/state/curl_code" 2>/dev/null || printf '204' ;;
 esac
 EOF
@@ -149,6 +162,13 @@ make_config() {
       "port": 10808,
       "protocol": "mixed",
       "settings": {"auth": "noauth", "udp": true, "allowTransparent": false}
+    },
+    {
+      "tag": "ts-in",
+      "listen": "127.0.0.1",
+      "port": 10809,
+      "protocol": "mixed",
+      "settings": {"auth": "noauth", "udp": false}
     }
   ],
   "outbounds": [
@@ -178,9 +198,52 @@ make_config() {
       }
     },
     {"tag": "direct", "protocol": "freedom"},
-    {"tag": "block", "protocol": "blackhole"}
+    {"tag": "block", "protocol": "blackhole"},
+    {
+      "tag": "proxy-ts",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "203.0.113.9",
+            "port": 443,
+            "users": [
+              {"id": "test-user-id", "encryption": "none", "flow": "xtls-rprx-vision"}
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "example.com",
+          "fingerprint": "chrome",
+          "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "shortId": "0123456789abcdef"
+        }
+      }
+    }
   ],
-  "routing": {"domainStrategy": "AsIs", "rules": []}
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {"type": "field", "inboundTag": ["ts-in"], "outboundTag": "proxy-ts"},
+      {"type": "field", "port": "443", "network": "udp", "outboundTag": "block"},
+      {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"},
+      {"type": "field", "domain": ["geosite:private"], "outboundTag": "direct"},
+      {"type": "field", "ip": ["223.5.5.5", "114.114.114.114"], "outboundTag": "direct"},
+      {"type": "field", "domain": ["domain:alidns.com"], "outboundTag": "direct"},
+      {"type": "field", "ip": ["geoip:cn"], "outboundTag": "direct"},
+      {"type": "field", "domain": ["geosite:cn"], "outboundTag": "direct"},
+      {"type": "field", "inboundTag": ["direct-dns-1", "direct-dns-2"], "outboundTag": "direct"},
+      {"type": "field", "inboundTag": ["dns-module"], "outboundTag": "proxy"},
+      {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
+      {"type": "field", "domain": ["geosite:telegram", "domain:telegram.org"], "outboundTag": "proxy-ts"},
+      {"type": "field", "ip": ["geoip:telegram"], "outboundTag": "proxy-ts"},
+      {"type": "field", "domain": ["geosite:google"], "outboundTag": "proxy"}
+    ]
+  }
 }
 JSON
 }
@@ -477,16 +540,20 @@ fi
 # T18: the IPv6 guard is one catch-all rule, and status shows whether it is there
 # ---------------------------------------------------------------------------
 
+# The fixture already carries the guard (it mirrors the live policy), so the "absent"
+# case is produced by removing it and then restoring the fixture.
 cp -p "$HOME/.config/xray/config.json" "$TMP/config-guard.json"
-jq '.routing.rules += [{"type": "field", "ip": ["::/0"], "outboundTag": "block"}]' \
-  "$TMP/config-guard.json" > "$TMP/with-guard.json"
-install -m 600 "$TMP/with-guard.json" "$HOME/.config/xray/config.json"
+install -m 600 "$TMP/config-guard.json" "$HOME/.config/xray/config.json"
 run status
 if grep -q 'guard   : IPv6' "$OUT"; then ok "T18 status reports the IPv6 guard"; else bad "T18 guard not reported"; fi
 
-install -m 600 "$TMP/config-guard.json" "$HOME/.config/xray/config.json"
+jq '.routing.rules |= map(select(((.ip // []) | index("::/0")) == null))' \
+  "$TMP/config-guard.json" > "$TMP/no-guard.json"
+install -m 600 "$TMP/no-guard.json" "$HOME/.config/xray/config.json"
 run status
 if grep -q 'guard   : absent' "$OUT"; then ok "T18 status reports a missing guard"; else bad "T18 missing guard not reported"; fi
+
+install -m 600 "$TMP/config-guard.json" "$HOME/.config/xray/config.json"
 
 # ---------------------------------------------------------------------------
 # T19: a second VLESS outbound (the tailnet egress) is accepted; a broken one is not
@@ -509,6 +576,196 @@ if expect_rc 2 validate "$TMP/bad-vless.json"; then
 else
   bad "T19 broken VLESS outbound accepted"
 fi
+
+# ---------------------------------------------------------------------------
+# T20: route-order truth table — which outbound does a destination class reach?
+# ---------------------------------------------------------------------------
+
+cat > "$TMP/cases.json" <<'JSON'
+[
+  {"name": "private IPv6 literal",  "target": "fd7a:115c:a1e0::1",        "tags": ["private"],  "port": 443, "expect": "direct"},
+  {"name": "CN IPv6 literal",       "target": "240e:95c:8000::1",         "tags": ["cn"],       "port": 443, "expect": "direct"},
+  {"name": "foreign IPv6 literal",  "target": "2606:4700:4700::1111",     "tags": [],           "port": 443, "expect": "block"},
+  {"name": "telegram domain",       "target": "api.telegram.org",         "tags": ["telegram"], "port": 443, "expect": "proxy-ts"},
+  {"name": "CN domain",             "target": "www.baidu.com",            "tags": ["cn"],       "port": 443, "expect": "direct"},
+  {"name": "google domain",         "target": "www.gstatic.com",          "tags": ["google"],   "port": 443, "expect": "proxy"},
+  {"name": "unknown domain",        "target": "example.org",              "tags": [],           "port": 443, "expect": "proxy"},
+  {"name": "dns module to CN DNS",  "target": "223.5.5.5",                "inbound": "dns-module", "port": 443, "expect": "direct"},
+  {"name": "dns module to DoH IPv4","target": "104.16.249.249",           "inbound": "dns-module", "port": 443, "expect": "proxy"},
+  {"name": "dns module to DoH IPv6","target": "2606:4700::6810:f8f9",     "inbound": "dns-module", "port": 443, "expect": "proxy"},
+  {"name": "direct-dns inbound",    "target": "223.5.5.5",                "inbound": "direct-dns-1", "port": 443, "expect": "direct"},
+  {"name": "ts-in egress",          "target": "api.telegram.org",         "inbound": "ts-in",   "port": 443, "expect": "proxy-ts"},
+  {"name": "private IPv4",          "target": "192.168.0.1",              "tags": ["private"],  "port": 80,  "expect": "direct"},
+  {"name": "foreign IPv4 literal",  "target": "1.1.1.1",                  "tags": [],           "port": 443, "expect": "proxy"}
+]
+JSON
+
+# Evaluates the routing rules in order for each case. Rule-set membership (geoip:X /
+# geosite:X) cannot be known offline, so each case declares its own tags — the same
+# simplification test/dnswalk.ts uses. Prints the failures and exits non-zero if any.
+route_eval() {
+  python3 - "$1" "$TMP/cases.json" "${2:-check}" "${3:-}" <<'PY'
+import ipaddress, json, re, sys
+
+cfg = json.load(open(sys.argv[1]))
+cases = json.load(open(sys.argv[2]))
+mode = sys.argv[3]
+names = [n for n in sys.argv[4].split(",") if n]
+
+def is_ip(value):
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+def matches(rule, case):
+    if rule.get("type", "field") != "field":
+        return False
+    network = rule.get("network")
+    if network and case.get("network", "tcp") not in [n.strip() for n in network.split(",")]:
+        return False
+    port = rule.get("port")
+    if port is not None:
+        want = case.get("port")
+        if want is None:
+            return False
+        hit = False
+        for part in str(port).split(","):
+            if "-" in part:
+                lo, hi = part.split("-")
+                hit = hit or int(lo) <= want <= int(hi)
+            elif int(part) == want:
+                hit = True
+        if not hit:
+            return False
+    tags = {t.lower() for t in case.get("tags", [])}
+    ips = rule.get("ip")
+    if ips:
+        target = case.get("target", "")
+        if not is_ip(target):
+            return False
+        addr = ipaddress.ip_address(target)
+        hit = False
+        for entry in ips:
+            if entry.startswith("geoip:"):
+                hit = hit or entry[6:].lower() in tags
+            elif "/" in entry:
+                hit = hit or addr in ipaddress.ip_network(entry, strict=False)
+            else:
+                hit = hit or entry == str(addr)
+        if not hit:
+            return False
+    domains = rule.get("domain")
+    if domains:
+        target = case.get("target", "").lower()
+        if not target:
+            return False
+        hit = False
+        for entry in domains:
+            if entry.startswith("geosite:"):
+                hit = hit or entry[8:].lower() in tags
+            elif entry.startswith("domain:"):
+                d = entry[7:].lower()
+                hit = hit or target == d or target.endswith("." + d)
+            elif entry.startswith("full:"):
+                hit = hit or target == entry[5:].lower()
+            elif entry.startswith("keyword:"):
+                hit = hit or entry[8:].lower() in target
+            elif entry.startswith("regexp:"):
+                hit = hit or bool(re.search(entry[7:], target))
+            else:
+                hit = hit or target == entry.lower() or target.endswith("." + entry.lower())
+        if not hit:
+            return False
+    inbound = rule.get("inboundTag")
+    if inbound and case.get("inbound", "socks") not in inbound:
+        return False
+    return True
+
+rules = cfg.get("routing", {}).get("rules", [])
+default = cfg["outbounds"][0]["tag"]
+
+def walk(case):
+    for rule in rules:
+        if matches(rule, case):
+            return rule.get("outboundTag", default)
+    return default
+
+fails = 0
+for case in cases:
+    got = walk(case)
+    if mode == "check":
+        if got != case["expect"]:
+            print("FAIL %-22s expected %-9s got %s" % (case["name"], case["expect"], got))
+            fails += 1
+    elif case["name"] in names and got != "block":
+        print("FAIL %-22s guard did not take over (got %s)" % (case["name"], got))
+        fails += 1
+print("%d cases, %d failures" % (len(cases), fails))
+sys.exit(1 if fails else 0)
+PY
+}
+
+if route_eval "$HOME/.config/xray/config.json" check; then
+  ok "T20 destination classes reach the intended outbounds"
+else
+  bad "T20 route order"
+fi
+
+# An evaluator that cannot tell a broken order from a good one proves nothing: move the
+# ::/0 guard to the front and require the three IPv6 cases to be caught by it.
+jq '.routing.rules = (
+      [.routing.rules[] | select(((.ip // []) | index("::/0")) != null)]
+      + [.routing.rules[] | select(((.ip // []) | index("::/0")) == null)])' \
+  "$HOME/.config/xray/config.json" > "$TMP/reversed.json"
+if route_eval "$TMP/reversed.json" flip "private IPv6 literal,CN IPv6 literal,dns module to DoH IPv6"; then
+  ok "T20 the table detects a reordered guard"
+else
+  bad "T20 table has no discriminating power"
+fi
+
+# ---------------------------------------------------------------------------
+# T21: per-egress probe (the tailnet path that carries Telegram)
+# ---------------------------------------------------------------------------
+
+printf '302' > "$MOCK/state/curl_ts_code"
+if expect_rc 0 check; then ok "T21 check runs with the tailnet probe"; else bad "T21 check"; fi
+run status
+if grep -q 'egress  : telegram via proxy-ts: ok' "$OUT"; then
+  ok "T21 status shows the tailnet egress as ok"
+else
+  bad "T21 tailnet egress not shown"
+fi
+
+printf '000' > "$MOCK/state/curl_ts_code"
+run check
+run status
+if grep -q 'proxy-ts: fail' "$OUT"; then
+  ok "T21 a dead tailnet egress is reported as fail"
+else
+  bad "T21 dead tailnet egress not reported"
+fi
+if grep -q 'tailnet egress probe failed' "$OUT"; then
+  ok "T21 a dead tailnet egress is warned about"
+else
+  bad "T21 no warning for the tailnet egress"
+fi
+
+jq 'del(.inbounds[] | select(.tag == "ts-in"))
+    | .routing.rules |= map(select(((.inboundTag // []) | index("ts-in")) == null))' \
+  "$HOME/.config/xray/config.json" > "$TMP/no-ts.json"
+install -m 600 "$TMP/no-ts.json" "$HOME/.config/xray/config.json"
+if expect_rc 0 validate; then ok "T21 a config without ts-in still validates"; else bad "T21 no-ts config rejected"; fi
+run check
+run status
+if grep -q 'proxy-ts: skip' "$OUT"; then
+  ok "T21 without ts-in the probe is skipped, not failed"
+else
+  bad "T21 missing ts-in not skipped"
+fi
+cp -p "$TMP/config-guard.json" "$HOME/.config/xray/config.json"
+printf '204' > "$MOCK/state/curl_code"
 
 # ---------------------------------------------------------------------------
 # uninstall restores autostart

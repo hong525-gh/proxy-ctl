@@ -32,6 +32,15 @@ readonly E_PREFLIGHT=5
 readonly IPV6_PROBE_URL="https://[2001:67c:4e8:f002::a]/"
 readonly IPV6_HANG_MS=3000
 
+# Per-egress probe (2026-11-09): since 2026-11-05 Telegram leaves by the tailnet egress
+# (`proxy-ts`) to dodge packet loss on the public path, but every other probe in this file
+# goes through `proxy`. A dead tailnet therefore left the health record green while
+# Telegram was down. A second mixed inbound that only routes to `proxy-ts` makes that path
+# testable without touching the main one.
+readonly TS_PORT="${TS_PORT:-10809}"
+readonly TS_PROBE_URL="${TS_PROBE_URL:-https://api.telegram.org/}"
+readonly TS_MAX_TIME="${TS_MAX_TIME:-8}"
+
 # Throughput probe (2026-11-04): the 2026-11-03 failure was not a dead tunnel but a
 # per-flow throttle towards Cloudflare/Fastly (~38 KB/s) that the 204 probe could not
 # see. Measure one Cloudflare target (the WARP-routed direction) and one non-CF
@@ -242,6 +251,41 @@ has_global_ipv6() {
   ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 '
 }
 
+# Is the diagnostic inbound for the tailnet egress configured?
+ts_inbound_present() {
+  [[ -f $CONFIG_FILE ]] || return 1
+  jq -e 'any(.inbounds[]?; .tag == "ts-in")' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+# Probe the tailnet egress through its own inbound. Prints "<state> <ms> <code>";
+# state is ok for any 2xx/3xx (api.telegram.org answers 302), fail otherwise.
+probe_ts() {
+  local started elapsed code state
+  started=$(date +%s%3N)
+  code=$(env -u http_proxy -u https_proxy -u all_proxy \
+              -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+              curl -s -o /dev/null -w '%{http_code}' \
+              --noproxy '' -x "http://127.0.0.1:$TS_PORT" \
+              -m "$TS_MAX_TIME" "$TS_PROBE_URL" 2>/dev/null) || code=0
+  [[ $code =~ ^[0-9]{3}$ ]] || code=0
+  elapsed=$(( $(date +%s%3N) - started ))
+  if [[ $code =~ ^[23][0-9][0-9]$ ]]; then state=ok; else state=fail; fi
+  printf '%s %s %s\n' "$state" "$elapsed" "$code"
+}
+
+# The tailnet egress needs a moment after a restart (WireGuard handshake + REALITY), so a
+# single cold-start timeout must not be reported as a dead path: retry once, like the main
+# 204 probe does.
+probe_ts_with_retry() {
+  local out
+  out=$(probe_ts)
+  if [[ ${out%% *} != ok ]]; then
+    sleep "${TS_RETRY_WAIT:-2}"
+    out=$(probe_ts)
+  fi
+  printf '%s\n' "$out"
+}
+
 query_exit_ip() {
   env -u http_proxy -u https_proxy -u all_proxy \
       -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
@@ -333,10 +377,13 @@ policy_ok() {
   # or more, and require every one of them to be REALITY + Vision with a non-empty key.
   jq -e '
     (.inbounds | length) > 0
-    and ([.inbounds[] | select(.protocol == "mixed")] | length) == 1
-    and ([.inbounds[] | select(.protocol == "mixed")][0].listen) == "127.0.0.1"
-    and ([.inbounds[] | select(.protocol == "mixed")][0].port) == 10808
+    and ([.inbounds[] | select(.protocol == "mixed" and (.port|tostring) == "10808")] | length) == 1
+    and ([.inbounds[] | select((.port|tostring) == "10808")][0].listen) == "127.0.0.1"
     and ([.inbounds[] | select(.listen == "0.0.0.0")] | length) == 0
+    and ([.inbounds[] | select(.tag != "ts-in" and .listen != "127.0.0.1")] | length) == 0
+    and ([.inbounds[] | select(.tag == "ts-in" and (.protocol != "mixed" or (.port|tostring) != "10809" or .listen != "127.0.0.1"))] | length) == 0
+    and ([.routing.rules[]? | select((.inboundTag // []) | index("ts-in"))] | length)
+        == ([.inbounds[] | select(.tag == "ts-in")] | length)
     and ([.outbounds[] | select(.protocol == "vless")] | length) >= 1
     and ([.outbounds[]
           | select(.protocol == "vless")
@@ -356,6 +403,8 @@ policy_diag() {
     any_zero: ([.inbounds[] | select(.listen == "0.0.0.0")] | length),
     outbounds: [.outbounds[].protocol],
     vless: ([.outbounds[] | select(.protocol == "vless")] | length),
+    ts_in: ([.inbounds[] | select(.tag == "ts-in")] | length),
+    ts_rule: ([.routing.rules[]? | select((.inboundTag // []) | index("ts-in"))] | length),
     vless_tags: [.outbounds[] | select(.protocol == "vless") | .tag],
     vless_bad: [.outbounds[]
                 | select(.protocol == "vless")
@@ -412,6 +461,7 @@ health_write() {
   local result=$1 fails=$2 svc=$3 port=$4 mode=$5 http_code=$6 exit_ip=$7 reason=$8 last_notify=$9
   local ipv6_state=${10:-none} ipv6_ms=${11:-0} ipv6_local=${12:-false}
   local tp_cf=${13:-0} tp_ref=${14:-0} tp_state=${15:-none} tp_slow=${16:-0} tp_ts=${17:-}
+  local ts_state=${18:-skip} ts_ms=${19:-0} ts_code=${20:-0}
   local tmp="$HEALTH_FILE.tmp.$$"
   install -d -m 700 "$STATE_DIR"
   jq -n \
@@ -433,12 +483,16 @@ health_write() {
     --arg tp_state "$tp_state" \
     --argjson tp_slow "$tp_slow" \
     --arg tp_ts "$tp_ts" \
+    --arg ts_state "$ts_state" \
+    --argjson ts_ms "$ts_ms" \
+    --argjson ts_code "$ts_code" \
     '{ts:$ts, result:$result, fails:$fails, service:$service, port:$port,
       proxy_mode:$proxy_mode, http_code:$http_code, exit_ip:$exit_ip,
       reason:$reason, last_notify:$last_notify,
       ipv6_state:$ipv6_state, ipv6_ms:$ipv6_ms, ipv6_local:$ipv6_local,
       tp_cf_kbps:$tp_cf_kbps, tp_ref_kbps:$tp_ref_kbps, tp_state:$tp_state,
-      tp_slow:$tp_slow, tp_ts:$tp_ts}' > "$tmp"
+      tp_slow:$tp_slow, tp_ts:$tp_ts,
+      ts_state:$ts_state, ts_ms:$ts_ms, ts_code:$ts_code}' > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$HEALTH_FILE"
 }
@@ -507,6 +561,14 @@ cmd_check() {
     fi
   fi
 
+  # Per-egress probe: the tailnet path carries Telegram only. A failure here must not fail
+  # the whole tunnel (AUTO_OFF would cut every other site), so it is recorded and warned
+  # about separately.
+  local ts_state=skip ts_ms=0 ts_code=0
+  if [[ $result == ok ]] && ts_inbound_present; then
+    read -r ts_state ts_ms ts_code < <(probe_ts_with_retry) || true
+  fi
+
   # Throughput sample (every TP_INTERVAL_S only, to keep the probe cheap)
   local tp_cf=0 tp_ref=0 tp_state=none tp_slow=0 tp_ts="" tp_prev_ts tp_prev_slow now
   tp_prev_ts=$(health_field tp_ts)
@@ -558,7 +620,7 @@ cmd_check() {
   fi
 
   health_write "$result" "$fails" "$active" "$port" "${mode:-unknown}" "$http_code" "$exit_ip" "$reason" "$notify_ts" "$ipv6_state" "$ipv6_ms" "$ipv6_local" \
-    "$tp_cf" "$tp_ref" "$tp_state" "$tp_slow" "$tp_ts"
+    "$tp_cf" "$tp_ref" "$tp_state" "$tp_slow" "$tp_ts" "$ts_state" "$ts_ms" "$ts_code"
 
   if (( quiet )); then
     return 0
@@ -612,15 +674,21 @@ cmd_status() {
     v2ray_state=unknown
   fi
 
-  local ipv6_state ipv6_ms tp_cf tp_ref tp_state tp_slow
+  local ipv6_state ipv6_ms tp_cf tp_ref tp_state tp_slow ts_state ts_ms ts_code
   ipv6_state=$(health_field ipv6_state); [[ -n $ipv6_state ]] || ipv6_state=unknown
   ipv6_ms=$(health_field ipv6_ms); [[ $ipv6_ms =~ ^[0-9]+$ ]] || ipv6_ms=0
   tp_cf=$(health_field tp_cf_kbps); [[ $tp_cf =~ ^[0-9]+$ ]] || tp_cf=0
   tp_ref=$(health_field tp_ref_kbps); [[ $tp_ref =~ ^[0-9]+$ ]] || tp_ref=0
   tp_state=$(health_field tp_state); [[ -n $tp_state ]] || tp_state=unknown
   tp_slow=$(health_field tp_slow); [[ $tp_slow =~ ^[0-9]+$ ]] || tp_slow=0
+  ts_state=$(health_field ts_state); [[ -n $ts_state ]] || ts_state=unknown
+  ts_ms=$(health_field ts_ms); [[ $ts_ms =~ ^[0-9]+$ ]] || ts_ms=0
+  ts_code=$(health_field ts_code); [[ $ts_code =~ ^[0-9]+$ ]] || ts_code=0
   if (( tp_slow >= 2 )); then
     warnings+=("throughput below ${TP_MIN_KBPS} KB/s for ${tp_slow} consecutive samples (CF ${tp_cf}, ref ${tp_ref}): check the WARP egress or the VPS route")
+  fi
+  if [[ $ts_state == fail ]]; then
+    warnings+=("tailnet egress probe failed (http $ts_code, ${ts_ms}ms): Telegram traffic via proxy-ts is down; check tailscale status")
   fi
   if [[ $ipv6_state == hang || $ipv6_state == fail ]]; then
     warnings+=("IPv6 probe $ipv6_state (${ipv6_ms}ms): apps that prefer IPv6 will freeze or fall back slowly; restore the block rule or give the exit node IPv6")
@@ -655,6 +723,7 @@ cmd_status() {
   else
     say "guard   : absent — IPv6 literals can hang on the proxy path; add the ::/0 block rule"
   fi
+  say "egress  : telegram via proxy-ts: $ts_state (http $ts_code, ${ts_ms} ms)"
   say "speed   : cf ${tp_cf} KB/s · ref ${tp_ref} KB/s (${tp_state}, min ${TP_MIN_KBPS})"
   say "config  : $config_info"
   say "xray    : $xray_ver"

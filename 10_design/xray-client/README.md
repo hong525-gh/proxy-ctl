@@ -121,6 +121,33 @@ curl --noproxy '' -x http://127.0.0.1:10808 https://api.ipify.org
 `vpnctl status` 的 `guard` 行显示这条规则在不在；`vpnctl check` 的 `ipv6`
 状态靠它判断“快速失败”是策略还是故障。
 
+## 双出口与 `egress` 探针（2026-11-09 起）
+
+Telegram 走 `proxy-ts`（经 Tailscale），其余走 `proxy`。为了让第二条路也能被检查，
+客户端多了一个**只监听 `127.0.0.1:10809`** 的 mixed 入站（tag `ts-in`），路由首条
+直接把它交给 `proxy-ts`：
+
+```jsonc
+{"tag": "ts-in", "listen": "127.0.0.1", "port": 10809, "protocol": "mixed",
+ "settings": {"auth": "noauth", "udp": false}}
+// routing.rules[0]
+{"type": "field", "inboundTag": ["ts-in"], "outboundTag": "proxy-ts"}
+```
+
+`vpnctl check` 经 10809 请求 `https://api.telegram.org/`，`vpnctl status` 多出一行：
+
+```
+egress  : telegram via proxy-ts: ok (http 302, 210 ms)
+```
+
+这条探针失败**不会**把整体健康判为 fail（否则 `AUTO_OFF` 会因为 Telegram 一条路断了
+关掉全部代理），只在 `status` 的 `warn` 里提示。手工验证某条流量走的是 tailnet：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -x http://127.0.0.1:10809 https://api.telegram.org/
+ss -tn | grep 100.118.65.105:8443
+```
+
 ## 更新策略（安全优先）
 
 - **不自动更新，不做联网版本检查。**
