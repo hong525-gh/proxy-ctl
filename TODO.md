@@ -265,13 +265,16 @@ vpnctl check    # 期望 ipv6 : ok；status 的 guard 行应显示 absent
 
 ### What
 
-在 `login.tailscale.com/admin/dns` 的 **Split DNS** 里删除 `ts.net → 199.247.155.53` 这一条，保留 MagicDNS 与全局解析器 `100.118.65.105`。
+删除 `ts.net → 199.247.155.53` 这条**受限解析器（restricted nameserver，旧称 Split DNS）**，保留 MagicDNS 与全局解析器 `100.118.65.105`。
+
+> 路径按 2026-11-09 的现行后台：**https://console.tailscale.com/admin/dns**（旧的 `login.tailscale.com/admin/dns` 仍可打开，但界面已迁移；页面上也没有叫 “Split DNS” 的分区了，对应概念现在叫 **Restricted nameservers / 受限解析器**）。在该页搜索 `199.247` 即可定位到那一行，行尾 `⋯` → Remove。
 
 ### Why
 
 - `199.247.155.53` 是 **DNSimple（美国）**，是 `ts.net` 的公网权威服务器；它**不返回 tailnet 内部设备名**（实测 `vm-z4ziutm3.tail61cf19.ts.net` 返回空，而 `100.100.100.100` 能返回 `100.118.65.105`）。
 - Split DNS 优先级高于 MagicDNS，所以它会**抢走所有 `*.ts.net` 查询**，让设备名解析失败。
 - 它还给每台设备多加一个必须可达的境外解析器；客户端健康检查把它算在内，是 `dns-forward-failing` 的另一来源（本次平板的根因是客户端版本，但这条仍在）。
+- 补充（2026-11-09 查官方文档后确认）：**设备使用 exit node 时，Tailscale 默认把 exit node 当作所有域名的解析器，不受全局/受限解析器配置影响**。这解释了抓包里为什么看不到发往 `100.118.65.105:53` 的查询——平板当时的 DNS 由出口节点代答，而不是直连 dnsproxy。因此这条 split 配置对“开了出口节点的设备”基本不生效，删除主要是给**不走出口节点**的设备恢复 MagicDNS。
 
 ### How
 
