@@ -156,6 +156,34 @@ curl -s -o /dev/null -w '%{http_code}\n' -x http://127.0.0.1:10809 https://api.t
 ss -tn | grep 100.118.65.105:8443
 ```
 
+## 备用出口：机场 failover（2026-11-12 起）
+
+自建 VPS 之外还有一条机场备用出口（trojan，新加坡中转，来自 `~/.bashrc` 的
+`PROXY_BACKUP` 订阅）。**严格主备**：正常时所有未匹配流量走 `proxy`（VPS）；
+主出口失效时才切到备用。设计细节见 design.md §6.11。
+
+当前模式由 `outbounds[0].tag` 决定并显示在 `vpnctl status` 的 `failover` 行。
+
+```bash
+vpnctl use backup     # 手动切到机场备用（校验→备份→重启→探测，失败自动回滚）
+vpnctl use primary    # 切回 VPS（VPS 仍死时会探测失败并自动回滚到 backup）
+```
+
+备用出口有自己的诊断入站 `127.0.0.1:10811`（tag `bk-in`），`vpnctl check` 会经它
+探测备用路径并把 `bk_state/bk_ms/bk_code` 写进 `health.json`，`status` 的
+`backup` 行显示结果。backup 模式下整体健康判定改用 bk 探针，主探针只用于发现恢复。
+
+自动切换：`~/.config/vpn/vpn.conf` 里 `AUTO_FAILOVER=1`（默认 0）——primary 连续
+2 轮失败（约 6 分钟）且备用探针 ok 时自动 `use backup`；backup 模式下主探针恢复
+时自动 `use primary`。注意 `AUTO_FAILOVER=1` 时 `AUTO_OFF` 不生效。
+
+已知限制：机场订阅会轮换密码/域名，**订阅刷新是手动动作**（重新提取节点后
+`vpnctl edit` 更新 `proxy-backup` 出站）；备用失效时 `status` 的 `backup` 行会
+显示 fail。backup 模式不接管 Telegram（仍走 `proxy-ts`/tailnet）。Google 等未匹配
+流量跟随默认路由（原 `geosite:google → proxy` 的 pin 已于 2026-11-12 删除——它让
+backup 模式下 Google 被钉在死掉的 VPS 上）。备用节点选择以实测为准：新加坡中转1
+曾出现 Google 系站点挂起（其他站点正常），中转2 全通，故现用中转2。
+
 ## 更新策略（安全优先）
 
 - **不自动更新，不做联网版本检查。**
@@ -191,12 +219,14 @@ vpnctl update-geo --from ~/Downloads/geo --source <下载页 URL>
 
 ```bash
 AUTO_OFF=0
+AUTO_FAILOVER=0
 UPGRADE_MIN_AGE_DAYS=60
 HEALTH_URL=https://www.gstatic.com/generate_204
 NOTIFY=1
 ```
 
 - `AUTO_OFF=1`：连续 2 轮探测失败后自动关系统代理并停服务，同时通知“已切回直连”。
+- `AUTO_FAILOVER=1`：连续 2 轮失败且备用出口可用时自动切到机场备用，主出口恢复后自动切回（见上一节）。置 1 时 `AUTO_OFF` 不生效。
 - `UPGRADE_MIN_AGE_DAYS`：升级冷却天数，默认 60；改小等于放松安全门槛。
 - `HEALTH_URL`：健康探测地址，必须返回 204；改它就是一次信任决定。
 - `NOTIFY=0`：关闭桌面通知，journal 与 `health.json` 仍然记录。

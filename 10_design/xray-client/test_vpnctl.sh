@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # test_vpnctl.sh — 离线验收测试（不访问网络，不改真实系统）
 # 覆盖 design.md 第 9 节的静态部分：T1/T2/T3/T7/T11/T13/T16 的核心逻辑，
-# 以及 2026-11-09 新增的 T17（geo 代码清单）/ T18（IPv6 catch-all 守卫）/ T19（多 VLESS 出站）。
+# 2026-11-09 新增的 T17（geo 代码清单）/ T18（IPv6 catch-all 守卫）/ T19（多 VLESS 出站），
+# 以及 2026-11-12 新增的 T23（备用出口 failover：bk-in 策略、use backup|primary、AUTO_FAILOVER）。
 # 真实 systemd / GNOME 的 T4~T6、T8~T10、T12 需要在主机上人工验收。
 
 set -uo pipefail
@@ -84,6 +85,13 @@ for a in "$@"; do
   case $prev in -x) proxy=$a ;; esac
   prev=$a
 done
+if [[ $proxy == *:10811 ]]; then
+  case $url in
+    *api.ipify.org*) echo "198.51.100.99" ;;
+    *) cat "$MOCK/state/curl_bk_code" 2>/dev/null || printf '204' ;;
+  esac
+  exit 0
+fi
 case $url in
   *api.ipify.org*) echo "203.0.113.7" ;;
   *api.telegram.org*)
@@ -176,6 +184,13 @@ make_config() {
       "port": 10810,
       "protocol": "mixed",
       "settings": {"auth": "noauth", "udp": false}
+    },
+    {
+      "tag": "bk-in",
+      "listen": "127.0.0.1",
+      "port": 10811,
+      "protocol": "mixed",
+      "settings": {"auth": "noauth", "udp": false}
     }
   ],
   "outbounds": [
@@ -207,6 +222,21 @@ make_config() {
     {"tag": "direct", "protocol": "freedom"},
     {"tag": "block", "protocol": "blackhole"},
     {
+      "tag": "proxy-backup",
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {"address": "192.0.2.55", "port": 13005, "password": "test-backup-password"}
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {"serverName": "192.0.2.55", "allowInsecure": false}
+      },
+      "mux": {"enabled": false}
+    },
+    {
       "tag": "proxy-ts",
       "protocol": "vless",
       "settings": {
@@ -237,6 +267,7 @@ make_config() {
     "rules": [
       {"type": "field", "inboundTag": ["ts-in"], "outboundTag": "proxy-ts"},
       {"type": "field", "inboundTag": ["probe-in"], "outboundTag": "proxy"},
+      {"type": "field", "inboundTag": ["bk-in"], "outboundTag": "proxy-backup"},
       {"type": "field", "port": "443", "network": "udp", "outboundTag": "block"},
       {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"},
       {"type": "field", "domain": ["geosite:private"], "outboundTag": "direct"},
@@ -248,8 +279,7 @@ make_config() {
       {"type": "field", "inboundTag": ["dns-module"], "outboundTag": "proxy"},
       {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
       {"type": "field", "domain": ["geosite:telegram", "domain:telegram.org"], "outboundTag": "proxy-ts"},
-      {"type": "field", "ip": ["geoip:telegram"], "outboundTag": "proxy-ts"},
-      {"type": "field", "domain": ["geosite:google"], "outboundTag": "proxy"}
+      {"type": "field", "ip": ["geoip:telegram"], "outboundTag": "proxy-ts"}
     ]
   }
 }
@@ -614,7 +644,7 @@ JSON
 # geosite:X) cannot be known offline, so each case declares its own tags — the same
 # simplification test/dnswalk.ts uses. Prints the failures and exits non-zero if any.
 route_eval() {
-  python3 - "$1" "$TMP/cases.json" "${2:-check}" "${3:-}" <<'PY'
+  python3 - "$1" "${2:-$TMP/cases.json}" "${3:-check}" "${4:-}" <<'PY'
 import ipaddress, json, re, sys
 
 cfg = json.load(open(sys.argv[1]))
@@ -717,7 +747,7 @@ sys.exit(1 if fails else 0)
 PY
 }
 
-if route_eval "$HOME/.config/xray/config.json" check; then
+if route_eval "$HOME/.config/xray/config.json" "$TMP/cases.json" check; then
   ok "T20 destination classes reach the intended outbounds"
 else
   bad "T20 route order"
@@ -729,7 +759,7 @@ jq '.routing.rules = (
       [.routing.rules[] | select(((.ip // []) | index("::/0")) != null)]
       + [.routing.rules[] | select(((.ip // []) | index("::/0")) == null)])' \
   "$HOME/.config/xray/config.json" > "$TMP/reversed.json"
-if route_eval "$TMP/reversed.json" flip "private IPv6 literal,CN IPv6 literal,dns module to DoH IPv6"; then
+if route_eval "$TMP/reversed.json" "$TMP/cases.json" flip "private IPv6 literal,CN IPv6 literal,dns module to DoH IPv6"; then
   ok "T20 the table detects a reordered guard"
 else
   bad "T20 table has no discriminating power"
@@ -806,6 +836,128 @@ if expect_rc 2 validate "$TMP/bad-probe-in.json"; then
   ok "T22 a probe-in on the wrong port is rejected"
 else
   bad "T22 probe-in on the wrong port accepted"
+fi
+
+install -m 600 "$TMP/config-guard.json" "$HOME/.config/xray/config.json"
+
+# ---------------------------------------------------------------------------
+# T23: backup failover — bk-in policy, use backup|primary, AUTO_FAILOVER
+# ---------------------------------------------------------------------------
+
+# bk-in and its routing rule must coexist (same discipline as ts-in / probe-in)
+jq 'del(.routing.rules[] | select(((.inboundTag // []) | index("bk-in")) != null))' \
+  "$TMP/config-guard.json" > "$TMP/bk-no-rule.json"
+if expect_rc 2 validate "$TMP/bk-no-rule.json"; then
+  ok "T23 bk-in without its routing rule is rejected"
+else
+  bad "T23 bk-in without rule accepted"
+fi
+
+jq 'del(.inbounds[] | select(.tag == "bk-in"))
+    | .routing.rules |= map(select(((.inboundTag // []) | index("bk-in")) == null))
+    | .outbounds |= map(select(.tag != "proxy-backup"))' \
+  "$TMP/config-guard.json" > "$TMP/no-bk.json"
+if expect_rc 0 validate "$TMP/no-bk.json"; then
+  ok "T23 a config without the backup still validates"
+else
+  bad "T23 no-backup config rejected"
+fi
+
+# use backup moves proxy-backup to the front and is probed through bk-in
+touch "$MOCK/state/active" "$MOCK/state/port"
+printf '204' > "$MOCK/state/curl_bk_code"
+if expect_rc 0 use backup \
+  && [[ $(jq -r '.outbounds[0].tag' "$HOME/.config/xray/config.json") == proxy-backup ]]; then
+  ok "T23 use backup switches the default route"
+else
+  bad "T23 use backup"
+fi
+if expect_rc 0 use backup; then ok "T23 use backup is idempotent"; else bad "T23 use backup idempotence"; fi
+run status
+if grep -q 'failover: backup' "$OUT"; then ok "T23 status shows backup mode"; else bad "T23 status mode"; fi
+if grep -q 'running on the AIRPORT BACKUP' "$OUT"; then
+  ok "T23 status warns about backup mode"
+else
+  bad "T23 backup-mode warning missing"
+fi
+
+# use primary flips back; a dead backup probe rolls the switch back
+if expect_rc 0 use primary \
+  && [[ $(jq -r '.outbounds[0].tag' "$HOME/.config/xray/config.json") == proxy ]]; then
+  ok "T23 use primary switches back"
+else
+  bad "T23 use primary"
+fi
+printf '500' > "$MOCK/state/curl_bk_code"
+if expect_rc 4 use backup \
+  && [[ $(jq -r '.outbounds[0].tag' "$HOME/.config/xray/config.json") == proxy ]]; then
+  ok "T23 a dead backup probe rolls the switch back"
+else
+  bad "T23 dead-probe switch not rolled back"
+fi
+printf '204' > "$MOCK/state/curl_bk_code"
+
+if expect_rc 1 use sideways; then ok "T23 use rejects an unknown target"; else bad "T23 unknown target"; fi
+
+# in backup mode the backup probe is the health verdict, even with the primary dead
+expect_rc 0 use backup
+printf '500' > "$MOCK/state/curl_code"
+rm -f "$HOME/.local/state/vpn/health.json"
+if expect_rc 0 check \
+  && [[ $(jq -r '.result' "$HOME/.local/state/vpn/health.json") == ok ]] \
+  && [[ $(jq -r '.reason' "$HOME/.local/state/vpn/health.json") == "serving via backup" ]]; then
+  ok "T23 in backup mode the backup probe is the verdict"
+else
+  bad "T23 backup-mode verdict"
+fi
+
+# AUTO_FAILOVER: two failed rounds flip to backup; primary recovery flips back
+printf '204' > "$MOCK/state/curl_code"
+expect_rc 0 use primary
+cat > "$HOME/.config/vpn/vpn.conf" <<'EOF'
+AUTO_FAILOVER=1
+EOF
+rm -f "$HOME/.local/state/vpn/health.json"
+printf '500' > "$MOCK/state/curl_code"
+run check
+[[ $(jq -r '.outbounds[0].tag' "$HOME/.config/xray/config.json") == proxy ]] \
+  && ok "T23 AUTO_FAILOVER waits for two failed rounds" || bad "T23 flipped after one round"
+run check
+if [[ $(jq -r '.outbounds[0].tag' "$HOME/.config/xray/config.json") == proxy-backup ]]; then
+  ok "T23 AUTO_FAILOVER switches to backup after two failures"
+else
+  bad "T23 AUTO_FAILOVER did not switch"
+fi
+grep -q '机场备用' "$MOCK/state/notify.log" && ok "T23 failover notification sent" || bad "T23 failover notification missing"
+
+printf '204' > "$MOCK/state/curl_code"
+run check
+if [[ $(jq -r '.outbounds[0].tag' "$HOME/.config/xray/config.json") == proxy ]]; then
+  ok "T23 AUTO_FAILOVER switches back when the primary recovers"
+else
+  bad "T23 failback did not happen"
+fi
+grep -q '切回自建出口' "$MOCK/state/notify.log" && ok "T23 failback notification sent" || bad "T23 failback notification missing"
+rm -f "$HOME/.config/vpn/vpn.conf"
+
+# Backup-mode route table: the google pin was removed on 2026-11-12 exactly so Google
+# follows the default route (which is proxy-backup in this mode); Telegram stays pinned
+# to proxy-ts by design, and the diagnostic inbounds keep their fixed targets.
+jq '.outbounds |= ([.[] | select(.tag == "proxy-backup")] + [.[] | select(.tag != "proxy-backup")])' \
+  "$TMP/config-guard.json" > "$TMP/backup-mode.json"
+cat > "$TMP/cases-backup.json" <<'JSON'
+[
+  {"name": "google domain",   "target": "www.gstatic.com",  "tags": ["google"],   "port": 443, "expect": "proxy-backup"},
+  {"name": "unknown domain",  "target": "example.org",      "tags": [],           "port": 443, "expect": "proxy-backup"},
+  {"name": "telegram domain", "target": "api.telegram.org", "tags": ["telegram"], "port": 443, "expect": "proxy-ts"},
+  {"name": "bk-in egress",    "target": "example.org",      "inbound": "bk-in",   "port": 443, "expect": "proxy-backup"},
+  {"name": "probe-in egress", "target": "example.org",      "inbound": "probe-in","port": 443, "expect": "proxy"}
+]
+JSON
+if route_eval "$TMP/backup-mode.json" "$TMP/cases-backup.json" check; then
+  ok "T23 backup mode: google follows the default, telegram stays pinned"
+else
+  bad "T23 backup-mode route table"
 fi
 
 install -m 600 "$TMP/config-guard.json" "$HOME/.config/xray/config.json"

@@ -4,6 +4,16 @@
   },
   "inbounds": [
     {
+      "tag": "bk-in",
+      "listen": "127.0.0.1",
+      "port": 10811,
+      "protocol": "mixed",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
       "tag": "socks",
       "listen": "127.0.0.1",
       "port": 10808,
@@ -59,6 +69,30 @@
       }
     },
     {
+      "tag": "proxy-backup",
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "<BACKUP_HOST>",
+            "port": 13005,
+            "password": "<BACKUP_PASSWORD>"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "<BACKUP_HOST>",
+          "allowInsecure": false
+        }
+      },
+      "mux": {
+        "enabled": false
+      }
+    },
+    {
       "tag": "direct",
       "protocol": "freedom"
     },
@@ -70,6 +104,13 @@
   "routing": {
     "domainStrategy": "AsIs",
     "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "bk-in"
+        ],
+        "outboundTag": "proxy-backup"
+      },
       {
         "type": "field",
         "ip": [
