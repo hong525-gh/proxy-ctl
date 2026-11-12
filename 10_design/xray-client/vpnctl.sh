@@ -46,6 +46,14 @@ readonly PROBE_PORT="${PROBE_PORT:-10810}"
 readonly TS_PROBE_URL="${TS_PROBE_URL:-https://api.telegram.org/}"
 readonly TS_MAX_TIME="${TS_MAX_TIME:-8}"
 
+# Backup-egress probe (2026-11-12, design.md §6.11): one airport trojan node is the strict
+# cold standby for `proxy`. Its own diagnostic inbound (127.0.0.1:10811) makes the backup
+# path testable while the primary serves, and becomes the health verdict while the backup
+# serves. The active egress is derived from `outbounds[0].tag` — the config is the only
+# state, there is no separate mode file.
+readonly BK_PORT="${BK_PORT:-10811}"
+readonly BK_PROBE_URL="${BK_PROBE_URL:-https://www.gstatic.com/generate_204}"
+
 # Throughput probe (2026-11-04): the 2026-11-03 failure was not a dead tunnel but a
 # per-flow throttle towards Cloudflare/Fastly (~38 KB/s) that the 204 probe could not
 # see. Measure one Cloudflare target (the WARP-routed direction) and one non-CF
@@ -120,6 +128,7 @@ file_age_days() {
 
 load_conf() {
   AUTO_OFF=0
+  AUTO_FAILOVER=0
   HEALTH_URL="https://www.gstatic.com/generate_204"
   NOTIFY=1
   if [[ -f $VPN_CONF ]]; then
@@ -127,6 +136,7 @@ load_conf() {
     . "$VPN_CONF"
   fi
   AUTO_OFF=${AUTO_OFF:-0}
+  AUTO_FAILOVER=${AUTO_FAILOVER:-0}
   NOTIFY=${NOTIFY:-1}
   HEALTH_URL=${HEALTH_URL:-https://www.gstatic.com/generate_204}
   UPGRADE_MIN_AGE_DAYS=${UPGRADE_MIN_AGE_DAYS:-60}
@@ -303,6 +313,58 @@ probe_ts_with_retry() {
   printf '%s\n' "$out"
 }
 
+# Is the diagnostic inbound for the backup egress configured?
+bk_inbound_present() {
+  [[ -f $CONFIG_FILE ]] || return 1
+  jq -e 'any(.inbounds[]?; .tag == "bk-in")' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+# Which egress is serving: xray's default route is the FIRST outbound, so the mode is a
+# pure function of the config — "primary" (proxy first) or "backup" (proxy-backup first).
+failover_mode() {
+  [[ -f $CONFIG_FILE ]] || { printf 'unknown'; return 0; }
+  local first
+  first=$(jq -r '.outbounds[0].tag // ""' "$CONFIG_FILE" 2>/dev/null)
+  case $first in
+    proxy) printf 'primary' ;;
+    proxy-backup) printf 'backup' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# Probe the backup egress through its own inbound. Prints "<state> <ms> <code>";
+# state is ok only for 204 (generate_204), like the main probe.
+probe_bk() {
+  local started elapsed code state
+  started=$(date +%s%3N)
+  code=$(env -u http_proxy -u https_proxy -u all_proxy \
+              -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+              curl -s -o /dev/null -w '%{http_code}' \
+              --noproxy '' -x "http://127.0.0.1:$BK_PORT" \
+              -m "$TS_MAX_TIME" "$BK_PROBE_URL" 2>/dev/null) || code=0
+  [[ $code =~ ^[0-9]{3}$ ]] || code=0
+  elapsed=$(( $(date +%s%3N) - started ))
+  if [[ $code == 204 ]]; then state=ok; else state=fail; fi
+  printf '%s %s %s\n' "$state" "$elapsed" "$code"
+}
+
+probe_bk_with_retry() {
+  local out
+  out=$(probe_bk)
+  if [[ ${out%% *} != ok ]]; then
+    sleep "${TS_RETRY_WAIT:-2}"
+    out=$(probe_bk)
+  fi
+  printf '%s\n' "$out"
+}
+
+query_exit_ip_bk() {
+  env -u http_proxy -u https_proxy -u all_proxy \
+      -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+      curl -s --noproxy '' -x "http://127.0.0.1:$BK_PORT" \
+      -m 8 https://api.ipify.org 2>/dev/null || true
+}
+
 query_exit_ip() {
   env -u http_proxy -u https_proxy -u all_proxy \
       -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
@@ -397,13 +459,16 @@ policy_ok() {
     and ([.inbounds[] | select(.protocol == "mixed" and (.port|tostring) == "10808")] | length) == 1
     and ([.inbounds[] | select((.port|tostring) == "10808")][0].listen) == "127.0.0.1"
     and ([.inbounds[] | select(.listen == "0.0.0.0")] | length) == 0
-    and ([.inbounds[] | select(.tag != "ts-in" and .tag != "probe-in" and .listen != "127.0.0.1")] | length) == 0
+    and ([.inbounds[] | select(.tag != "ts-in" and .tag != "probe-in" and .tag != "bk-in" and .listen != "127.0.0.1")] | length) == 0
     and ([.inbounds[] | select(.tag == "probe-in" and (.protocol != "mixed" or (.port|tostring) != "10810" or .listen != "127.0.0.1"))] | length) == 0
     and ([.inbounds[] | select(.tag == "ts-in" and (.protocol != "mixed" or (.port|tostring) != "10809" or .listen != "127.0.0.1"))] | length) == 0
+    and ([.inbounds[] | select(.tag == "bk-in" and (.protocol != "mixed" or (.port|tostring) != "10811" or .listen != "127.0.0.1"))] | length) == 0
     and ([.routing.rules[]? | select((.inboundTag // []) | index("ts-in"))] | length)
         == ([.inbounds[] | select(.tag == "ts-in")] | length)
     and ([.routing.rules[]? | select((.inboundTag // []) | index("probe-in"))] | length)
         == ([.inbounds[] | select(.tag == "probe-in")] | length)
+    and ([.routing.rules[]? | select((.inboundTag // []) | index("bk-in"))] | length)
+        == ([.inbounds[] | select(.tag == "bk-in")] | length)
     and ([.outbounds[] | select(.protocol == "vless")] | length) >= 1
     and ([.outbounds[]
           | select(.protocol == "vless")
@@ -427,6 +492,8 @@ policy_diag() {
     ts_rule: ([.routing.rules[]? | select((.inboundTag // []) | index("ts-in"))] | length),
     probe_in: ([.inbounds[] | select(.tag == "probe-in")] | length),
     probe_rule: ([.routing.rules[]? | select((.inboundTag // []) | index("probe-in"))] | length),
+    bk_in: ([.inbounds[] | select(.tag == "bk-in")] | length),
+    bk_rule: ([.routing.rules[]? | select((.inboundTag // []) | index("bk-in"))] | length),
     vless_tags: [.outbounds[] | select(.protocol == "vless") | .tag],
     vless_bad: [.outbounds[]
                 | select(.protocol == "vless")
@@ -484,6 +551,7 @@ health_write() {
   local ipv6_state=${10:-none} ipv6_ms=${11:-0} ipv6_local=${12:-false}
   local tp_cf=${13:-0} tp_ref=${14:-0} tp_state=${15:-none} tp_slow=${16:-0} tp_ts=${17:-}
   local ts_state=${18:-skip} ts_ms=${19:-0} ts_code=${20:-0}
+  local bk_state=${21:-skip} bk_ms=${22:-0} bk_code=${23:-0}
   local tmp="$HEALTH_FILE.tmp.$$"
   install -d -m 700 "$STATE_DIR"
   jq -n \
@@ -508,13 +576,17 @@ health_write() {
     --arg ts_state "$ts_state" \
     --argjson ts_ms "$ts_ms" \
     --argjson ts_code "$ts_code" \
+    --arg bk_state "$bk_state" \
+    --argjson bk_ms "$bk_ms" \
+    --argjson bk_code "$bk_code" \
     '{ts:$ts, result:$result, fails:$fails, service:$service, port:$port,
       proxy_mode:$proxy_mode, http_code:$http_code, exit_ip:$exit_ip,
       reason:$reason, last_notify:$last_notify,
       ipv6_state:$ipv6_state, ipv6_ms:$ipv6_ms, ipv6_local:$ipv6_local,
       tp_cf_kbps:$tp_cf_kbps, tp_ref_kbps:$tp_ref_kbps, tp_state:$tp_state,
       tp_slow:$tp_slow, tp_ts:$tp_ts,
-      ts_state:$ts_state, ts_ms:$ts_ms, ts_code:$ts_code}' > "$tmp"
+      ts_state:$ts_state, ts_ms:$ts_ms, ts_code:$ts_code,
+      bk_state:$bk_state, bk_ms:$bk_ms, bk_code:$bk_code}' > "$tmp"
   chmod 600 "$tmp"
   mv -f "$tmp" "$HEALTH_FILE"
 }
@@ -591,6 +663,22 @@ cmd_check() {
     read -r ts_state ts_ms ts_code < <(probe_ts_with_retry) || true
   fi
 
+  # Backup egress (design.md §6.11): probed through its own inbound whenever the service
+  # is up, in BOTH modes — in primary mode it tells us whether a fallback target exists,
+  # in backup mode it IS the serving path and becomes the verdict.
+  local primary_result=$result fmode bk_state=skip bk_ms=0 bk_code=0
+  fmode=$(failover_mode)
+  if [[ $active == active && $port == true ]] && bk_inbound_present; then
+    read -r bk_state bk_ms bk_code < <(probe_bk_with_retry) || true
+  fi
+  if [[ $fmode == backup && $active == active && $port == true ]]; then
+    if [[ $bk_state == ok ]]; then
+      result=ok; http_code=$bk_code; reason="serving via backup"; exit_ip=$(query_exit_ip_bk)
+    else
+      result=fail; reason="backup probe failed"; http_code=0
+    fi
+  fi
+
   # Throughput sample (every TP_INTERVAL_S only, to keep the probe cheap)
   local tp_cf=0 tp_ref=0 tp_state=none tp_slow=0 tp_ts="" tp_prev_ts tp_prev_slow now
   tp_prev_ts=$(health_field tp_ts)
@@ -633,7 +721,35 @@ cmd_check() {
     fi
   fi
 
-  if [[ $result == fail && $fails -ge 2 && ${AUTO_OFF:-0} == 1 ]]; then
+  # Failover decision (design.md §6.11): with AUTO_FAILOVER=1, two consecutive failed
+  # rounds on the primary plus a green backup probe trigger an automatic switch; once the
+  # primary answers again (it is probed every round, even in backup mode) the switch is
+  # reverted. With a standby to switch to, AUTO_OFF is meaningless and stays inert.
+  if [[ ${AUTO_FAILOVER:-0} == 1 ]]; then
+    if [[ $fmode == primary && $result == fail && $fails -ge 2 && $bk_state == ok ]]; then
+      if use_failover backup >/dev/null 2>&1; then
+        reason="primary dead (${fails} rounds); auto-failover to backup"
+        result=ok; http_code=204; fails=0
+        exit_ip=$(query_exit_ip_bk)
+        notify_user "VPN 已切换到机场备用" "主出口连续失败；恢复后自动切回。vpnctl use primary 可手动切回"
+      else
+        reason="$reason; auto-failover to backup FAILED"
+        notify_user "VPN 备用切换失败" "自动切换到备用出口未成功；vpnctl status 查看"
+      fi
+      notify_ts=$(now_iso)
+      fmode=$(failover_mode)
+    elif [[ $fmode == backup && $primary_result == ok ]]; then
+      if use_failover primary >/dev/null 2>&1; then
+        reason="primary recovered; auto-failback to primary"
+        exit_ip=$(query_exit_ip)
+        notify_user "VPN 已切回自建出口" "主出口恢复，机场备用退回待命"
+      else
+        notify_user "VPN 回切失败" "主出口已恢复但切回失败；请手动 vpnctl use primary"
+      fi
+      notify_ts=$(now_iso)
+      fmode=$(failover_mode)
+    fi
+  elif [[ $result == fail && $fails -ge 2 && ${AUTO_OFF:-0} == 1 ]]; then
     set_proxy_off || true
     systemctl --user stop "$SERVICE" >/dev/null 2>&1 || true
     reason="$reason; auto-off"
@@ -642,7 +758,8 @@ cmd_check() {
   fi
 
   health_write "$result" "$fails" "$active" "$port" "${mode:-unknown}" "$http_code" "$exit_ip" "$reason" "$notify_ts" "$ipv6_state" "$ipv6_ms" "$ipv6_local" \
-    "$tp_cf" "$tp_ref" "$tp_state" "$tp_slow" "$tp_ts" "$ts_state" "$ts_ms" "$ts_code"
+    "$tp_cf" "$tp_ref" "$tp_state" "$tp_slow" "$tp_ts" "$ts_state" "$ts_ms" "$ts_code" \
+    "$bk_state" "$bk_ms" "$bk_code"
 
   if (( quiet )); then
     return 0
@@ -697,6 +814,7 @@ cmd_status() {
   fi
 
   local ipv6_state ipv6_ms tp_cf tp_ref tp_state tp_slow ts_state ts_ms ts_code
+  local bk_state bk_ms bk_code fmode
   ipv6_state=$(health_field ipv6_state); [[ -n $ipv6_state ]] || ipv6_state=unknown
   ipv6_ms=$(health_field ipv6_ms); [[ $ipv6_ms =~ ^[0-9]+$ ]] || ipv6_ms=0
   tp_cf=$(health_field tp_cf_kbps); [[ $tp_cf =~ ^[0-9]+$ ]] || tp_cf=0
@@ -706,11 +824,20 @@ cmd_status() {
   ts_state=$(health_field ts_state); [[ -n $ts_state ]] || ts_state=unknown
   ts_ms=$(health_field ts_ms); [[ $ts_ms =~ ^[0-9]+$ ]] || ts_ms=0
   ts_code=$(health_field ts_code); [[ $ts_code =~ ^[0-9]+$ ]] || ts_code=0
+  bk_state=$(health_field bk_state); [[ -n $bk_state ]] || bk_state=unknown
+  bk_ms=$(health_field bk_ms); [[ $bk_ms =~ ^[0-9]+$ ]] || bk_ms=0
+  bk_code=$(health_field bk_code); [[ $bk_code =~ ^[0-9]+$ ]] || bk_code=0
+  fmode=$(failover_mode)
   if (( tp_slow >= 2 )); then
     warnings+=("throughput below ${TP_MIN_KBPS} KB/s for ${tp_slow} consecutive samples (CF ${tp_cf}, ref ${tp_ref}): check the WARP egress or the VPS route")
   fi
   if [[ $ts_state == fail ]]; then
     warnings+=("tailnet egress probe failed (http $ts_code, ${ts_ms}ms): Telegram traffic via proxy-ts is down; check tailscale status")
+  fi
+  if [[ $fmode == backup ]]; then
+    warnings+=("running on the AIRPORT BACKUP (default route -> proxy-backup); run 'vpnctl use primary' once the VPS recovers")
+  elif [[ $health == fail && $bk_state == ok ]]; then
+    warnings+=("primary is down but the backup is available: vpnctl use backup")
   fi
   if [[ $ipv6_state == hang || $ipv6_state == fail ]]; then
     warnings+=("IPv6 probe $ipv6_state (${ipv6_ms}ms): apps that prefer IPv6 will freeze or fall back slowly; restore the block rule or give the exit node IPv6")
@@ -751,6 +878,12 @@ cmd_status() {
     say "probe   : via 127.0.0.1:$PORT (not pinned — the probe may follow a rule to direct)"
   fi
   say "egress  : telegram via proxy-ts: $ts_state (http $ts_code, ${ts_ms} ms)"
+  say "failover: $fmode (default route -> $(jq -r '.outbounds[0].tag // "?"' "$CONFIG_FILE" 2>/dev/null || echo '?'))"
+  if bk_inbound_present; then
+    say "backup  : airport via proxy-backup: $bk_state (http $bk_code, ${bk_ms} ms)"
+  else
+    say "backup  : not configured"
+  fi
   say "speed   : cf ${tp_cf} KB/s · ref ${tp_ref} KB/s (${tp_state}, min ${TP_MIN_KBPS})"
   say "config  : $config_info"
   say "xray    : $xray_ver"
@@ -907,6 +1040,85 @@ cmd_rollback() {
     die "$E_HEALTH" "rollback to $(basename "$backup") failed health check"
   fi
   say "rolled back to $(basename "$backup")"
+}
+
+# ---------------------------------------------------------------------------
+# 命令：use backup|primary（主备切换，design.md §6.11）
+# ---------------------------------------------------------------------------
+
+# Move the requested egress to the front of outbounds (xray's default route is the first
+# outbound), then validate → backup → install → restart → probe the TARGET egress; any
+# failure restores the previous config. Shared by `vpnctl use` and the AUTO_FAILOVER path.
+use_failover() {
+  local target=$1 tag
+  case $target in
+    backup)  tag=proxy-backup ;;
+    primary) tag=proxy ;;
+    *) warn "use: unknown target '$target' (want backup|primary)"; return "$E_USAGE" ;;
+  esac
+  [[ $(failover_mode) == "$target" ]] && return 0
+  jq -e --arg t "$tag" 'any(.outbounds[]?; .tag == $t)' "$CONFIG_FILE" >/dev/null 2>&1 || {
+    warn "use $target: outbound '$tag' is not in the config"; return "$E_PREFLIGHT"; }
+  if [[ $target == backup ]] && ! bk_inbound_present; then
+    warn "use backup: bk-in inbound is not in the config"; return "$E_PREFLIGHT"
+  fi
+
+  local tmpdir tmp
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/vpn-use.XXXXXX")
+  tmp="$tmpdir/config.json"
+  if ! jq --arg t "$tag" '.outbounds |= ([.[] | select(.tag == $t)] + [.[] | select(.tag != $t)])' \
+        "$CONFIG_FILE" > "$tmp"; then
+    rm -rf "$tmpdir"; warn "use $target: jq rewrite failed"; return "$E_VALIDATE"
+  fi
+  chmod 600 "$tmp"
+  if ! validate_cfg "$tmp" "$ASSET_DIR" "$XRAY_BIN" >/dev/null 2>&1; then
+    rm -rf "$tmpdir"; warn "use $target: candidate failed validation"; return "$E_VALIDATE"
+  fi
+  backup_config
+  local backup
+  backup=$(ls -1t "$BACKUP_DIR"/config-*.json | head -n 1)
+  install -m 600 "$tmp" "$CONFIG_FILE"
+  rm -rf "$tmpdir"
+
+  if service_active; then
+    if ! { systemctl --user restart "$SERVICE" && wait_port; }; then
+      warn "use $target: restart failed; restoring previous mode"
+      install -m 600 "$backup" "$CONFIG_FILE"
+      systemctl --user restart "$SERVICE" >/dev/null 2>&1 || true
+      return "$E_SERVICE"
+    fi
+    local probe_ok=1 i
+    for i in 1 2; do
+      if [[ $target == backup ]]; then
+        [[ $(probe_bk) == ok\ * ]] && { probe_ok=0; break; }
+      else
+        probe_http && { probe_ok=0; break; }
+      fi
+      sleep 5
+    done
+    if (( probe_ok != 0 )); then
+      warn "use $target: probe failed; rolling back to previous mode"
+      install -m 600 "$backup" "$CONFIG_FILE"
+      systemctl --user restart "$SERVICE" >/dev/null 2>&1 || true
+      wait_port || true
+      return "$E_HEALTH"
+    fi
+  else
+    warn "service is inactive; mode switch takes effect on the next start"
+  fi
+  return 0
+}
+
+cmd_use() {
+  local target=${1:-}
+  [[ -n $target ]] || die "$E_USAGE" "usage: vpnctl use backup|primary"
+  load_conf
+  need_cmd jq
+  [[ -f $CONFIG_FILE ]] || die "$E_PREFLIGHT" "config not installed: $CONFIG_FILE"
+  local rc=0
+  use_failover "$target" || rc=$?
+  (( rc == 0 )) || die "$rc" "use $target failed; previous mode kept"
+  say "mode: $(failover_mode) (default route -> $(jq -r '.outbounds[0].tag // "?"' "$CONFIG_FILE"))"
 }
 
 # ---------------------------------------------------------------------------
@@ -1399,6 +1611,7 @@ vpnctl — xray 本地配置文件代理控制
   vpnctl on | off | restart | status | ip
   vpnctl check [--quiet]
   vpnctl edit | rollback
+  vpnctl use backup|primary
   vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url>
                  [--security-fix --reason <text>] [--allow-downgrade]
   vpnctl update-geo --from <dir> --source <url>
@@ -1428,6 +1641,7 @@ main() {
     ip) cmd_ip ;;
     edit) cmd_edit ;;
     rollback) cmd_rollback ;;
+    use) cmd_use "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
     update-geo) cmd_update_geo "$@" ;;
     geo-manifest) cmd_geo_manifest "$@" ;;
