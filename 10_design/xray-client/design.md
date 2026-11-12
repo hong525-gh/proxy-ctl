@@ -577,10 +577,13 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 - **backup 模式下谁跟随默认路由**（2026-11-12 实机教训）：原来规则表末尾有一条
   `geosite:google → proxy` 的显式 pin。primary 模式下它与默认路由等价（多余）；
   切到 backup 后 Google 却因此被钉在死掉的 VPS 上——“备用生效但 Google 全灭”。
-  该 pin 已删除，Google 等未匹配流量跟随默认路由。**仍然显式 pin 的只有**：
-  Telegram → `proxy-ts`（有意不接管，见下）、`probe-in` → `proxy`（主探针必须
-  测主出口）、`bk-in` → `proxy-backup`、`dns-module` → `proxy`（实测无流量经过，
-  见 §11.1；保留不动）。
+  该 pin 已删除，Google 等未匹配流量跟随默认路由。**同日用户决策**：Telegram 的两条
+  `→ proxy-ts` pin 也已删除，同样跟随默认路由——`proxy-ts` 走 tailnet，与 VPS 同生
+  共死，pin 着它等于 backup 模式下 Telegram 陪葬；代价是 VPS 恢复后 Telegram 回到
+  公网路径，失去 2026-11-05 引入 proxy-ts 时的抗丢包特性，若联通出口丢包复发可
+  一行改回。**仍然显式 pin 的只有**：`probe-in` → `proxy`（主探针必须测主出口）、
+  `bk-in` → `proxy-backup`、`ts-in` → `proxy-ts`（tailnet 探针）、
+  `dns-module` → `proxy`（实测无流量经过，见 §11.1；保留不动）。
 - 健康检查（§6.4 的扩展）：
   - primary 模式：主判定照旧（`probe-in`→`proxy`）；bk 探针只记录 `bk_state/bk_ms/bk_code`，
     失败不影响整体判定（同 `ts-in` 原则）。
@@ -596,7 +599,9 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 - 机场订阅会轮换（密码/域名变化）：订阅刷新是**手动**动作（重新提取节点、
   `vpnctl edit`），不做自动订阅同步（非目标）。备用失效时 `status` 的 bk 行会显示 fail。
 - backup 模式下 Telegram 仍走 `proxy-ts`（tailnet）；tailnet 与主 VPS 同生共死，
-  备用出口不接管 Telegram——这是有意取舍（机场流量按量计费）。
+  备用出口不接管 Telegram——~~这是有意取舍（机场流量按量计费）~~ **（2026-11-12 修订：
+  该取舍已被用户推翻，telegram 的 proxy-ts pin 已删除、跟随默认路由；VPS 恢复后
+  Telegram 回到公网路径，失去抗丢包特性，必要时一行改回）**
 - 机场出口是共享 IP，稳定性与合规性不在我们控制内；它是“断网时比直连强”的兜底，
   不是与自建节点同级的出口。
 
@@ -773,6 +778,7 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 
 ## 13. 变更记录
 
+- 2026-11-12（二）：Telegram 由 `proxy-ts` pin 改为跟随默认路由。What：删除路由表两条 `telegram → proxy-ts` 规则（domain 与 geoip），保留 `ts-in → proxy-ts` 探针规则与 `proxy-ts` 出站；§6.11「仍显式 pin 的只有」清单与「备用出口不接管 Telegram」条目同步修订；T20/T23 路由真值表更新（79 项仍全绿）。Why：VPS 故障期间 `proxy-ts`（tailnet）与 VPS 同死，pin 着 Telegram 等于备用模式下 Telegram 陪葬；用户明确要求 Telegram 走代理。Who：用户指令 → 助手实施。How：jq 删规则 → 三段式校验 → 备份 → 重启；实机验证 `api.telegram.org [socks >> proxy-backup]` 302、core.telegram.org 200。代价：VPS 恢复后 Telegram 回到公网路径，失去 2026-11-05 引入 proxy-ts 的抗丢包特性；若联通出口丢包复发，重新加回两条规则即可（配置备份在 `~/.local/state/vpn/backups/`）。Rollback：`vpnctl rollback` 恢复最近一次备份。
 - 2026-11-12：升级到 v1.2.0，新增 §6.11「备用出口：机场 strict failover」。What：D9 由「单节点不做 failover」改为「严格主备」；新增 `vpnctl use backup|primary`、bk-in 诊断入站（127.0.0.1:10811）、health.json 的 `bk_*` 字段、`AUTO_FAILOVER` 开关（默认 0）；§1 非目标、§3.3 D9、§7 接口表、§11.1 同步修订；删除路由表末尾多余的 `geosite:google → proxy` pin（primary 下与默认路由等价，backup 下会把 Google 钉在死掉的主出口上）。Why：2026-11-12 VPS 上游路由故障导致全球不可达数小时，「被封只能 off 直连」的残余风险兑现；用户决定把 `~/.bashrc` 的 `PROXY_BACKUP` 机场订阅（trojan 新加坡中转节点）接入为备用出口，并否决了 xray leastPing 均衡方案（主备都健康时出口 IP 会漂移）。Who：用户指令 → 助手设计并实施。How：doc-first 改设计，再改 `vpnctl.sh` 与 `test_vpnctl.sh`（59 → 79 项），离线测试通过后实机应用；模式由 `outbounds[0].tag` 派生（配置即事实源），不引入新状态文件；凭据只落 0600 的配置文件，订阅 URL 留在 `~/.bashrc`。实机两个教训：① 新加坡中转1 对 Google 系站点挂起（其他站点正常），换中转2 后全通——备用节点以实测为准；② google pin 问题见 §6.11「backup 模式下谁跟随默认路由」。验证：`test_vpnctl.sh` 79 项全绿；实机 `AUTO_FAILOVER=1` 下首轮 check 自动切到备用（exit IP 变为机场节点），Google/YouTube/GitHub/国内直连全部实测通过。Rollback：分支 `backup-failover` 合入前可整支丢弃；配置面 `vpnctl use primary` + `vpnctl rollback`。
 - 2026-11-09：加固（依据 TODO 4.1–4.3）。改动：① IPv6 拦截由五个手写前缀改为一条 `ip: ["::/0"] → block`，位置在直连规则之后、代理与 Telegram 规则之前（实测 IPv6 字面量由挂起变为 8 ms 失败）；② `policy_ok` 支持多个 VLESS 出站（并要求每个都是 REALITY + Vision），修掉 2026-11-05 以来 `validate` 一直拒绝真实配置的缺陷；③ 新增诊断入站 `127.0.0.1:10809`（tag `ts-in`）与首条路由，`vpnctl check` 增加 tailnet 出口探针，`status` 增加 `egress` 行；④ 新增 `geo-manifest.py` 与 `vpnctl geo-manifest`，`validate` 会点名不存在的 `geosite:`/`geoip:` 代码；⑤ `test_vpnctl.sh` 增加 T17–T21（geo 清单、IPv6 守卫、多 VLESS、路由真值表、tailnet 探针），42 → 59 项；⑥ 新增 §11.1“不保护什么”；⑦ 新增 `probe-in`（127.0.0.1:10810）并把 204/出口 IP/测速固定到 `proxy`，修掉“探针被 `geosite:cn` 命中而走直连”的假绿问题；⑧ 用临时实例 + access log 实测 DNS 路径（`dns-module` 0 次、目标以域名记录），决策 A1：不启用 `IPIfNonMatch`；⑨ 评估 `gai.conf`：只影响不走代理的 glibc 程序，保留。原因：对照 sing-box 配置生成器的设计，补齐“每个出口各自自检”“规则顺序离线可验证”“显式写出不保护什么”三件事。验证：`test_vpnctl.sh` 59 项全过；实机 `vpnctl validate`/`check` 通过，见 TODO 4.1 验收。
 - 2026-10-24：创建设计稿（v0.1）。原因：用户决定从 v2rayN GUI 迁移到本地配置文件方案，要求先出设计并逐条处理已识别的风险。

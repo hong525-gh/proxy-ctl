@@ -179,9 +179,11 @@ vpnctl use primary    # 切回 VPS（VPS 仍死时会探测失败并自动回滚
 
 已知限制：机场订阅会轮换密码/域名，**订阅刷新是手动动作**（重新提取节点后
 `vpnctl edit` 更新 `proxy-backup` 出站）；备用失效时 `status` 的 `backup` 行会
-显示 fail。backup 模式不接管 Telegram（仍走 `proxy-ts`/tailnet）。Google 等未匹配
-流量跟随默认路由（原 `geosite:google → proxy` 的 pin 已于 2026-11-12 删除——它让
-backup 模式下 Google 被钉在死掉的 VPS 上）。备用节点选择以实测为准：新加坡中转1
+显示 fail。~~backup 模式不接管 Telegram（仍走 `proxy-ts`/tailnet）。~~（2026-11-12
+修订：Telegram 的 proxy-ts pin 已删除，跟随默认路由——备用生效期间 Telegram 经
+机场出境；VPS 恢复后回到公网路径，失去 proxy-ts 的抗丢包特性，必要时可一行改回。）
+Google 等未匹配流量跟随默认路由（原 `geosite:google → proxy` 的 pin 已于
+2026-11-12 删除——它让 backup 模式下 Google 被钉在死掉的 VPS 上）。备用节点选择以实测为准：新加坡中转1
 曾出现 Google 系站点挂起（其他站点正常），中转2 全通，故现用中转2。
 
 ## 更新策略（安全优先）

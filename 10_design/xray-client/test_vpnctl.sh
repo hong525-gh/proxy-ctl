@@ -277,9 +277,7 @@ make_config() {
       {"type": "field", "domain": ["geosite:cn"], "outboundTag": "direct"},
       {"type": "field", "inboundTag": ["direct-dns-1", "direct-dns-2"], "outboundTag": "direct"},
       {"type": "field", "inboundTag": ["dns-module"], "outboundTag": "proxy"},
-      {"type": "field", "ip": ["::/0"], "outboundTag": "block"},
-      {"type": "field", "domain": ["geosite:telegram", "domain:telegram.org"], "outboundTag": "proxy-ts"},
-      {"type": "field", "ip": ["geoip:telegram"], "outboundTag": "proxy-ts"}
+      {"type": "field", "ip": ["::/0"], "outboundTag": "block"}
     ]
   }
 }
@@ -624,7 +622,7 @@ cat > "$TMP/cases.json" <<'JSON'
   {"name": "private IPv6 literal",  "target": "fd7a:115c:a1e0::1",        "tags": ["private"],  "port": 443, "expect": "direct"},
   {"name": "CN IPv6 literal",       "target": "240e:95c:8000::1",         "tags": ["cn"],       "port": 443, "expect": "direct"},
   {"name": "foreign IPv6 literal",  "target": "2606:4700:4700::1111",     "tags": [],           "port": 443, "expect": "block"},
-  {"name": "telegram domain",       "target": "api.telegram.org",         "tags": ["telegram"], "port": 443, "expect": "proxy-ts"},
+  {"name": "telegram domain",       "target": "api.telegram.org",         "tags": ["telegram"], "port": 443, "expect": "proxy"},
   {"name": "CN domain",             "target": "www.baidu.com",            "tags": ["cn"],       "port": 443, "expect": "direct"},
   {"name": "google domain",         "target": "www.gstatic.com",          "tags": ["google"],   "port": 443, "expect": "proxy"},
   {"name": "unknown domain",        "target": "example.org",              "tags": [],           "port": 443, "expect": "proxy"},
@@ -940,16 +938,17 @@ fi
 grep -q '切回自建出口' "$MOCK/state/notify.log" && ok "T23 failback notification sent" || bad "T23 failback notification missing"
 rm -f "$HOME/.config/vpn/vpn.conf"
 
-# Backup-mode route table: the google pin was removed on 2026-11-12 exactly so Google
-# follows the default route (which is proxy-backup in this mode); Telegram stays pinned
-# to proxy-ts by design, and the diagnostic inbounds keep their fixed targets.
+# Backup-mode route table: the google and telegram pins were removed on 2026-11-12 so
+# both follow the default route (proxy-backup in this mode); the diagnostic inbounds
+# keep their fixed targets — probe-in measures the primary, bk-in the backup, ts-in the
+# tailnet path (kept for a possible future re-pin).
 jq '.outbounds |= ([.[] | select(.tag == "proxy-backup")] + [.[] | select(.tag != "proxy-backup")])' \
   "$TMP/config-guard.json" > "$TMP/backup-mode.json"
 cat > "$TMP/cases-backup.json" <<'JSON'
 [
   {"name": "google domain",   "target": "www.gstatic.com",  "tags": ["google"],   "port": 443, "expect": "proxy-backup"},
   {"name": "unknown domain",  "target": "example.org",      "tags": [],           "port": 443, "expect": "proxy-backup"},
-  {"name": "telegram domain", "target": "api.telegram.org", "tags": ["telegram"], "port": 443, "expect": "proxy-ts"},
+  {"name": "telegram domain", "target": "api.telegram.org", "tags": ["telegram"], "port": 443, "expect": "proxy-backup"},
   {"name": "bk-in egress",    "target": "example.org",      "inbound": "bk-in",   "port": 443, "expect": "proxy-backup"},
   {"name": "probe-in egress", "target": "example.org",      "inbound": "probe-in","port": 443, "expect": "proxy"}
 ]
