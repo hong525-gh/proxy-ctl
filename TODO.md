@@ -4,6 +4,60 @@
 
 ---
 
+## 待办 6：服务商切换新 IP 段后的迁移（等通知，清单先行）
+
+**状态**：等服务商通知（2026-11-12 通知：207.56/207.57 段国际方向中断，新 IP 段筹备中，切换安排另行发布）
+**建立日期**：2026-11-12
+
+### What（要达成什么）
+
+拿到新 IPv4 后，把所有引用旧公网 IP `207.56.18.51` 的地方一次性切过去，并做全量验证。
+**tailnet IP（100.118.65.105）不变**，Tailscale 侧零操作（tailscaled 状态文件不受影响，无需重新授权）。
+
+### Why
+
+旧段国际方向被上游中断且可能直接弃用；所有指向旧 IP 的配置在切换瞬间全部失效，漏改一处就是下一次故障。
+
+### Who
+
+- **你**：收服务商切换通知、执行面板操作（若有）、把新 IP 发给我。
+- **我**：改配置、验证、更新文档与监视。
+
+### When
+
+服务商发布切换安排后尽快；切换前本机继续跑机场备用（`AUTO_FAILOVER` 已兜底）。
+
+### Where（引用旧 IP 的完整清单，切换时逐项打勾）
+
+| # | 位置 | 改什么 |
+|---|------|--------|
+| 1 | 本机 `~/.ssh/config`（Host `hong`） | HostName → 新 IP |
+| 2 | 本机 `~/.config/xray/config.json` | `proxy` 出站的 `address`（`proxy-ts` 指向 tailnet IP，**不用改**） |
+| 3 | 本机 `~/.local/state/vpn/vps-watch.sh` | 探测目标 → 新 IP（或直接停掉该后台任务） |
+| 4 | 文档 `10_design/vps-tailscale-exit-node.md` | 全文 IP 引用（§1 清单、§6 手册、§6.8） |
+| 5 | VPS 侧（切换后 SSH 验证） | 确认 xray 监听 8443、ufw 仍放行、tailscaled 自动上线、dnsproxy/warp 正常（均不依赖公网 IP 值，预期零改动） |
+| 6 | 手机/平板节点配置（若直连 VPS 而非 exit node） | 节点地址同步 |
+
+### How
+
+1. 拿到新 IP 先测可达：`ping -c 4 <新IP>`、`nc -zv -w 5 <新IP> 22`（应通；若不通先找服务商）。
+2. 按上表 1→3 改本机；`vpnctl validate && systemctl --user restart xray-client`。
+3. 等 `vpn-health.timer` 探到主出口恢复 → `AUTO_FAILOVER` 自动切回 primary（`vpnctl status` 的 `failover` 行应变回 primary，exit IP 变为新 IP）。
+4. SSH 上新 IP 做服务端体检（设计文档 §6「服务端快速体检」五条）。
+5. 全绿后更新文档与变更记录；`AUTO_FAILOVER` 保留（备用出口长期有效）。
+
+### 验收标准
+
+- `vpnctl status`：`failover: primary`、health ok、exit = 新 IP；`egress`/`backup` 行正常；
+- SSH（新 IP）、手机 exit node、Telegram（公网路径）全部可用；
+- `vpnctl use backup` / `use primary` 手动往返各一次成功（验证 failover 机制在新 IP 下仍工作）。
+
+### 回滚
+
+配置改动均有 `~/.local/state/vpn/backups/` 时间戳备份；`vpnctl rollback` 一键回退；旧 IP 若恢复，`~/.ssh/config` 与 `proxy` 出站地址改回即可。
+
+---
+
 ## 待办 1：向服务商咨询/申请这台 VPS 的 IPv6，并在拿到后完成配置与收尾
 
 **状态**：待你跟进（面板/工单需要你的账号；不阻塞当前使用，临时方案已生效）
