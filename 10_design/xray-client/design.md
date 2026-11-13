@@ -2,7 +2,7 @@
 
 - 版本：1.2.0（新增 §6.11 备用出口 strict failover）
 - 日期：2026-10-24（2026-11-12 修订）
-- 范围：Fedora 44 / GNOME / 自建香港服务器（VLESS + REALITY + Vision）+ 一条机场备用出口（trojan，strict failover）
+- 范围：Fedora 44 / GNOME / 自建香港服务器（VLESS + REALITY + Vision）+ 一条备用出口（strict failover；2026-11-12 为机场 trojan，2026-11-13 起为 VPS 公网路径）
 - 关联文档：[VPN/AGENTS.md](../../AGENTS.md)、[proxy-ctl/DESIGN.md](../../../proxy-ctl/DESIGN.md)
 
 设计与实现均已落地，实现文件在本目录；T4～T16 的实机验收尚未执行，结果记入第 13 节。
@@ -22,7 +22,7 @@
 ### 非目标
 
 - 不做 TUN / 透明代理（本机运行 Tailscale 与 Docker，改路由的风险高于收益）。
-- 不做多节点池、订阅自动同步、自动测速、负载均衡；自建节点之外只保留**一条**机场备用出口（§6.11），严格主备，不混跑。
+- 不做多节点池、订阅自动同步、自动测速、负载均衡；自建节点之外只保留**一条**备用出口（§6.11），严格主备，不混跑。
 - 不替代 `proxy-ctl`，也不接管它的环境变量逻辑。
 - 不支持 macOS / Windows；本设计只针对当前这台 Fedora。
 - 不做流量统计、连接数面板、Web UI。
@@ -110,7 +110,7 @@
 | D6 | 健康检查用外部 timer | Xray 不支持 `sd_notify`，systemd `WatchdogSec` 无法感知隧道是否可用 | `WatchdogSec`（只能发现进程卡死） |
 | D7 | 默认不自动关代理，只通知 | 自动关代理 = 静默回落直连，与“代理应当显式可控”冲突；可用性优先者可通过 `AUTO_OFF=1` 显式选择 | 失败即自动 `off` |
 | D8 | 内核与资产版本化，不自动联网下载 | 避免升级/供应链把可用配置弄坏；更新必须是一次显式动作 | 启动时自动拉取 geo 文件 |
-| D9 | 严格主备：默认只走自建节点；备用出口（机场）仅在主出口失效时接管，由 `vpnctl use` 显式切换或 `AUTO_FAILOVER=1` 自动切换（§6.11） | 2026-11-12 VPS 路由故障证明“被封只能 off 直连”不可接受；但负载均衡式混跑会让出口 IP 在主备之间漂移（网站会话断裂、机场流量白耗），所以是主备不是均衡 | xray `observatory`+`leastPing` 均衡（两个出口都健康时会随机选中机场，出口 IP 漂移） |
+| D9 | 严格主备：默认只走自建节点；备用出口仅在主出口失效时接管，由 `vpnctl use` 显式切换或 `AUTO_FAILOVER=1` 自动切换（§6.11） | 2026-11-12 VPS 路由故障证明“被封只能 off 直连”不可接受；但负载均衡式混跑会让出口 IP 在主备之间漂移（网站会话断裂、备用流量白耗），所以是主备不是均衡 | xray `observatory`+`leastPing` 均衡（两个出口都健康时会随机选中备用，出口 IP 漂移） |
 | D10 | 仓库只放模板，真实配置只在本机 | 凭据零落盘到仓库（AGENTS 硬性要求） | 配置文件入库 |
 | D11 | 更新只选“最近的稳定版”，并做供应链核查 | 代理是网络入口；追新和第三方转存是投毒/回归的主要入口。用 60 天冷却 + 官方来源 + SHA256 + 证据文件约束 | 追 `latest` / 自动更新 |
 
@@ -556,7 +556,7 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 
 去重：只在状态翻转时发一次；同一状态 30 分钟内不重复。不会每 3 分钟刷屏。默认不自动关代理（D7）；`AUTO_OFF=1` 时连续 2 轮失败（约 6 分钟）自动 `off`，并额外通知“已切回直连”。
 
-### 6.11 备用出口：机场 strict failover（2026-11-12）
+### 6.11 备用出口：strict failover（2026-11-12 上线；2026-11-13 备用由机场改为 VPS 公网路径）
 
 **背景**：2026-11-12 VPS 上游路由故障（整机全球不可达约数小时，见 `../vps-tailscale-exit-node.md`），暴露 D9“单节点无 failover”的残余风险。处置：把 `~/.bashrc` 里 `PROXY_BACKUP` 机场订阅中的一个 trojan 中转节点（新加坡）加为**备用出口**，严格主备。
 
@@ -565,10 +565,17 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 - 当前生效出口由 `outbounds[0].tag` 唯一决定（xray 默认路由 = 第一个出站）：
   `proxy` 在首位 = **primary 模式**；`proxy-backup` 在首位 = **backup 模式**。
   模式不另存状态文件，配置即事实源。
+- **主出口路径（2026-11-13 用户决策）**：`proxy` 出站的地址由 VPS 公网 IP 改为
+  tailnet IP `100.118.65.105`——主出口经 Tailscale 隧道到达 VPS 上的同一个
+  vless 服务。动机：tailnet 路径对“家宽线路封锁单个 IP”免疫（可走 DERP 中转），
+  而公网直连没有这层保险。后果：`proxy` 与 `proxy-ts` 指向同一地址（冗余但无害，
+  vpnctl 机制不变）；tailnet 掉线时由 AUTO_FAILOVER 切到公网备用路径。
 - 备用出口与诊断入站（镜像 `ts-in`/`probe-in` 模式）：
-  - outbound `proxy-backup`：trojan + TLS，参数来自机场订阅（密码只进
-    `~/.config/xray/config.json`（0600），订阅 URL 只留在 `~/.bashrc` 的
-    `PROXY_BACKUP`，两边都不进仓库、不进文档）。
+  - outbound `proxy-backup`：**2026-11-13 起为 vless + REALITY → VPS 公网 IP
+    （156.238.127.216:8443）**，参数与 `proxy` 相同、仅地址不同——主备同机不同路
+    （主走 tailnet，备走公网）。此前的形态是 trojan + TLS 机场中转节点（参数来自
+    `~/.bashrc` 的 `PROXY_BACKUP` 订阅）；机场订阅到期不续，且 VPS 公网路径实测
+    更快（204 探针 0.4s vs 机场 2.5s），用户决定于 2026-11-13 切换。
   - inbound `bk-in`：`127.0.0.1:10811`，mixed；路由 `inboundTag:["bk-in"] → proxy-backup`。
     用途：健康检查有一条**只走备用出口**的探针路径，与主探针（`probe-in`→`proxy`）互不干扰。
 - 切换命令 `vpnctl use backup|primary`：jq 把目标出站移到首位 → 三段式校验 →
@@ -596,14 +603,16 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 **已知限制**：
 
 - 切换延迟：手动即时；自动最长约 6 分钟（2 轮 × 3 分钟）。
-- 机场订阅会轮换（密码/域名变化）：订阅刷新是**手动**动作（重新提取节点、
-  `vpnctl edit`），不做自动订阅同步（非目标）。备用失效时 `status` 的 bk 行会显示 fail。
+- **主备同机（2026-11-13 起）**：备用出口与主出口是同一台 VPS 的两条路径
+  （tailnet / 公网）。VPS 整机宕机或服务商故障时主备同死，本方案只覆盖
+  “单条路径失效”（tailnet 故障、线路封锁 VPS 公网 IP 等）；覆盖整机故障
+  需要第二个独立服务商，暂不做。
 - backup 模式下 Telegram 仍走 `proxy-ts`（tailnet）；tailnet 与主 VPS 同生共死，
   备用出口不接管 Telegram——~~这是有意取舍（机场流量按量计费）~~ **（2026-11-12 修订：
   该取舍已被用户推翻，telegram 的 proxy-ts pin 已删除、跟随默认路由；VPS 恢复后
   Telegram 回到公网路径，失去抗丢包特性，必要时一行改回）**
-- 机场出口是共享 IP，稳定性与合规性不在我们控制内；它是“断网时比直连强”的兜底，
-  不是与自建节点同级的出口。
+- ~~机场出口是共享 IP~~（2026-11-13 起备用已改为 VPS 公网路径，本条不再适用；
+  若未来重新启用机场备用：机场订阅会轮换，订阅刷新是**手动**动作，不做自动订阅同步）
 
 ---
 
@@ -749,7 +758,7 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 | **未走代理的域名解析** | `routing.domainStrategy = "AsIs"`，客户端解析由 systemd-resolved → `192.168.0.1` 完成；2026-11-09 实测（临时实例 + access log，5 条流量）目标一律以**域名**记录、`dns-module` 出现 **0 次** | 这些域名可能拿到污染答案；`dns` 段（远程 DoH、AAAA 置空）对这一层**不生效**，它是“写了但不在路径上”的策略。决策见 TODO 4.4：保持 A1（不做 `IPIfNonMatch`） |
 | **非代理应用的 IPv6** | catch-all 规则只在 xray 的路由里 | 这类应用直连 IPv6，成败取决于线路，不受 `::/0 → block` 约束 |
 | **国内 IPv6 被全局压掉** | `/etc/gai.conf` 让 glibc 程序优先 IPv4（`getent ahosts` 已验证顺序）；Chromium 自带解析器、Go 不读 gai.conf，所以**只影响不走代理的 glibc 程序** | 这批程序无法用国内 IPv6；换来的是“非代理应用不会先撞被墙的 IPv6 再挂起”。2026-11-09 评估：保留，见 TODO 4.5 |
-| **主出口单点** | 默认路由固定走自建节点（`proxy`） | 主出口失效时自动/手动切到机场备用（§6.11）；备用也失效时同旧行为：`off` 后直连 |
+| **主出口单点** | 默认路由固定走自建节点（`proxy`，2026-11-13 起经 tailnet 路径） | 主出口失效时自动/手动切到备用（§6.11）；备用也失效时同旧行为：`off` 后直连 |
 | **tailnet 单路径** | Telegram 经 `proxy-ts`（Tailscale） | Tailscale/DERP 中断时 Telegram 断，其余流量正常；`vpnctl status` 的 `egress` 行会显示 `fail`（2026-11-09 起） |
 | **per-app 分流** | Linux 桌面端 Tailscale 无官方 per-app 分流，本方案也未做 | 只能整机分流，不能按程序 |
 | **健康检查的时延** | `vpn-health.timer` 每 3 分钟一轮 | 故障最长约 3 分钟才被发现，期间的连接由应用自己报错 |
@@ -779,6 +788,7 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 ## 13. 变更记录
 
 - 2026-11-12（二）：Telegram 由 `proxy-ts` pin 改为跟随默认路由。What：删除路由表两条 `telegram → proxy-ts` 规则（domain 与 geoip），保留 `ts-in → proxy-ts` 探针规则与 `proxy-ts` 出站；§6.11「仍显式 pin 的只有」清单与「备用出口不接管 Telegram」条目同步修订；T20/T23 路由真值表更新（79 项仍全绿）。Why：VPS 故障期间 `proxy-ts`（tailnet）与 VPS 同死，pin 着 Telegram 等于备用模式下 Telegram 陪葬；用户明确要求 Telegram 走代理。Who：用户指令 → 助手实施。How：jq 删规则 → 三段式校验 → 备份 → 重启；实机验证 `api.telegram.org [socks >> proxy-backup]` 302、core.telegram.org 200。代价：VPS 恢复后 Telegram 回到公网路径，失去 2026-11-05 引入 proxy-ts 的抗丢包特性；若联通出口丢包复发，重新加回两条规则即可（配置备份在 `~/.local/state/vpn/backups/`）。Rollback：`vpnctl rollback` 恢复最近一次备份。
+- 2026-11-13：主出口改走 tailnet + 备用出口由机场改为 VPS 公网路径。What：① `~/.config/xray/config.json` 的 `proxy` 出站地址 → `100.118.65.105`（tailnet）；② `proxy-backup` 出站由机场 trojan（vbg69tna.3nvx.com:13006）整体替换为 vless+REALITY → `156.238.127.216:8443`（复制 `proxy` 参数仅改地址）；③ design.md §1 范围、§2 非目标、§3.3 D9、§6.11 标题/模型/已知限制、§11 风险表同步修订；④ `vpnctl.sh` 状态行 `backup  : airport via proxy-backup` 改为 `backup  : proxy-backup (<实际地址>)` 动态显示、backup 模式警告文案去机场化；`test_vpnctl.sh` 断言同步。Why：服务商完成 IP 切换（`207.56.18.51` → `156.238.127.216`）；用户决定主出口走 tailnet（对“家宽封锁单个 IP”免疫，DERP 中转兜底）、机场订阅到期不续并指定 VPS 公网路径接任备用；当日机场中继曾被联通线路定向封锁（后自恢复），证明共享出口不可靠。Who：用户指令 → 助手实施。How：先实机验证公网路径可行（TCP 8443 通、临时出站 204 探针 0.42s、exit IP 正确），再落盘；`vpnctl use backup`/`use primary` 往返各一次实测通过（exit 均为 156.238.127.216）；备份 `~/.local/state/vpn/backups/config-20261113-124742.json`、`config-20261113-130756.json`。已知代价：主备同机，VPS 整机故障时同死（§6.11 已知限制）；tailnet 路径吞吐受蜂窝链路影响波动大（CF 测速 50–174 KB/s 浮动）。Rollback：`vpnctl rollback` 或从上述备份恢复。
 - 2026-11-12：升级到 v1.2.0，新增 §6.11「备用出口：机场 strict failover」。What：D9 由「单节点不做 failover」改为「严格主备」；新增 `vpnctl use backup|primary`、bk-in 诊断入站（127.0.0.1:10811）、health.json 的 `bk_*` 字段、`AUTO_FAILOVER` 开关（默认 0）；§1 非目标、§3.3 D9、§7 接口表、§11.1 同步修订；删除路由表末尾多余的 `geosite:google → proxy` pin（primary 下与默认路由等价，backup 下会把 Google 钉在死掉的主出口上）。Why：2026-11-12 VPS 上游路由故障导致全球不可达数小时，「被封只能 off 直连」的残余风险兑现；用户决定把 `~/.bashrc` 的 `PROXY_BACKUP` 机场订阅（trojan 新加坡中转节点）接入为备用出口，并否决了 xray leastPing 均衡方案（主备都健康时出口 IP 会漂移）。Who：用户指令 → 助手设计并实施。How：doc-first 改设计，再改 `vpnctl.sh` 与 `test_vpnctl.sh`（59 → 79 项），离线测试通过后实机应用；模式由 `outbounds[0].tag` 派生（配置即事实源），不引入新状态文件；凭据只落 0600 的配置文件，订阅 URL 留在 `~/.bashrc`。实机两个教训：① 新加坡中转1 对 Google 系站点挂起（其他站点正常），换中转2 后全通——备用节点以实测为准；② google pin 问题见 §6.11「backup 模式下谁跟随默认路由」。验证：`test_vpnctl.sh` 79 项全绿；实机 `AUTO_FAILOVER=1` 下首轮 check 自动切到备用（exit IP 变为机场节点），Google/YouTube/GitHub/国内直连全部实测通过。Rollback：分支 `backup-failover` 合入前可整支丢弃；配置面 `vpnctl use primary` + `vpnctl rollback`。
 - 2026-11-09：加固（依据 TODO 4.1–4.3）。改动：① IPv6 拦截由五个手写前缀改为一条 `ip: ["::/0"] → block`，位置在直连规则之后、代理与 Telegram 规则之前（实测 IPv6 字面量由挂起变为 8 ms 失败）；② `policy_ok` 支持多个 VLESS 出站（并要求每个都是 REALITY + Vision），修掉 2026-11-05 以来 `validate` 一直拒绝真实配置的缺陷；③ 新增诊断入站 `127.0.0.1:10809`（tag `ts-in`）与首条路由，`vpnctl check` 增加 tailnet 出口探针，`status` 增加 `egress` 行；④ 新增 `geo-manifest.py` 与 `vpnctl geo-manifest`，`validate` 会点名不存在的 `geosite:`/`geoip:` 代码；⑤ `test_vpnctl.sh` 增加 T17–T21（geo 清单、IPv6 守卫、多 VLESS、路由真值表、tailnet 探针），42 → 59 项；⑥ 新增 §11.1“不保护什么”；⑦ 新增 `probe-in`（127.0.0.1:10810）并把 204/出口 IP/测速固定到 `proxy`，修掉“探针被 `geosite:cn` 命中而走直连”的假绿问题；⑧ 用临时实例 + access log 实测 DNS 路径（`dns-module` 0 次、目标以域名记录），决策 A1：不启用 `IPIfNonMatch`；⑨ 评估 `gai.conf`：只影响不走代理的 glibc 程序，保留。原因：对照 sing-box 配置生成器的设计，补齐“每个出口各自自检”“规则顺序离线可验证”“显式写出不保护什么”三件事。验证：`test_vpnctl.sh` 59 项全过；实机 `vpnctl validate`/`check` 通过，见 TODO 4.1 验收。
 - 2026-10-24：创建设计稿（v0.1）。原因：用户决定从 v2rayN GUI 迁移到本地配置文件方案，要求先出设计并逐条处理已识别的风险。
