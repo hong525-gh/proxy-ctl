@@ -46,11 +46,11 @@ readonly PROBE_PORT="${PROBE_PORT:-10810}"
 readonly TS_PROBE_URL="${TS_PROBE_URL:-https://api.telegram.org/}"
 readonly TS_MAX_TIME="${TS_MAX_TIME:-8}"
 
-# Backup-egress probe (2026-11-12, design.md §6.11): one airport trojan node is the strict
-# cold standby for `proxy`. Its own diagnostic inbound (127.0.0.1:10811) makes the backup
-# path testable while the primary serves, and becomes the health verdict while the backup
-# serves. The active egress is derived from `outbounds[0].tag` — the config is the only
-# state, there is no separate mode file.
+# Backup-egress probe (2026-11-12, design.md §6.11): a strict cold standby for `proxy`
+# (airport trojan 2026-11-12; VPS public path since 2026-11-13). Its own diagnostic
+# inbound (127.0.0.1:10811) makes the backup path testable while the primary serves, and
+# becomes the health verdict while the backup serves. The active egress is derived from
+# `outbounds[0].tag` — the config is the only state, there is no separate mode file.
 readonly BK_PORT="${BK_PORT:-10811}"
 readonly BK_PROBE_URL="${BK_PROBE_URL:-https://www.gstatic.com/generate_204}"
 
@@ -835,7 +835,7 @@ cmd_status() {
     warnings+=("tailnet egress probe failed (http $ts_code, ${ts_ms}ms): Telegram traffic via proxy-ts is down; check tailscale status")
   fi
   if [[ $fmode == backup ]]; then
-    warnings+=("running on the AIRPORT BACKUP (default route -> proxy-backup); run 'vpnctl use primary' once the VPS recovers")
+    warnings+=("running on the BACKUP egress (default route -> proxy-backup); run 'vpnctl use primary' once the primary recovers")
   elif [[ $health == fail && $bk_state == ok ]]; then
     warnings+=("primary is down but the backup is available: vpnctl use backup")
   fi
@@ -880,7 +880,9 @@ cmd_status() {
   say "egress  : telegram via proxy-ts: $ts_state (http $ts_code, ${ts_ms} ms)"
   say "failover: $fmode (default route -> $(jq -r '.outbounds[0].tag // "?"' "$CONFIG_FILE" 2>/dev/null || echo '?'))"
   if bk_inbound_present; then
-    say "backup  : airport via proxy-backup: $bk_state (http $bk_code, ${bk_ms} ms)"
+    local bk_addr
+    bk_addr=$(jq -r '(.outbounds[]? | select(.tag=="proxy-backup") | .settings.vnext[0].address // .settings.servers[0].address) // "?"' "$CONFIG_FILE" 2>/dev/null || echo '?')
+    say "backup  : proxy-backup ($bk_addr): $bk_state (http $bk_code, ${bk_ms} ms)"
   else
     say "backup  : not configured"
   fi

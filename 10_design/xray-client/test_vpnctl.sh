@@ -873,7 +873,7 @@ fi
 if expect_rc 0 use backup; then ok "T23 use backup is idempotent"; else bad "T23 use backup idempotence"; fi
 run status
 if grep -q 'failover: backup' "$OUT"; then ok "T23 status shows backup mode"; else bad "T23 status mode"; fi
-if grep -q 'running on the AIRPORT BACKUP' "$OUT"; then
+if grep -q 'running on the BACKUP egress' "$OUT"; then
   ok "T23 status warns about backup mode"
 else
   bad "T23 backup-mode warning missing"
