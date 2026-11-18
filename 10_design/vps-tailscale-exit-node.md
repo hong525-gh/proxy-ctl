@@ -396,7 +396,10 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
   4. 于是 DERP→xray→tailnet→（需要 DERP）**循环死锁**；
   5. 系统解析 = MagicDNS → 上游 `100.118.65.105`（走 tailnet）→ **全机 DNS 死**；xray 对非 cn 域名的 DoH（cloudflare，非规则命中 → 默认出站）也死。其他设备走 M245 自身 WiFi 无此依赖链，故正常。
 - **教训**：调整默认路由优先级前，必须先在目标拓扑下验证备用依赖链（UDP/DERP/系统 DNS）的数据面，而不是只 ping 网关。已录入 `CHECKLIST.md`。
-- **遗留待办**：① 主出口 8443 从本机两条线路均不通（11-13"定向封锁"同类，待 SSH 上 VPS 区分本端/对端）；② tailscaled 的 DERP/控制面应加入 GNOME 代理 ignore-hosts 走直连，打破循环；③ xray 默认出站不应是 backup（可考虑默认 direct，保证 tailnet 死时国内解析/直连仍活）。
+- **当日修复与排查（2026-11-18 晚，三项）**：
+  - ① **tailscaled 绕过 GNOME 代理（已落地）**：实测 tailscale 的 `tshttpproxy` **不认 GNOME ignore-hosts**（设置后 netcheck 仍走代理），但**尊重环境变量 `no_proxy`**。落法：systemd drop-in `/etc/systemd/system/tailscaled.service.d/no-proxy.conf`（`Environment=no_proxy=.tailscale.com,.ts.net,.tailscale.io` + 同值 NO_PROXY）→ `daemon-reload` → restart。验证：重启后 tailscaled 日志 tshttpproxy 出现 0 次、`tailscale ping` 直连 111ms。DERP 直连实测：蜂窝有线仅 `derp20b`(103.6.84.152) 可达（426/3.36s），20d/20c 不通——derp20b 是有线-only 下 tailnet 的唯一活路。回滚：删除 drop-in + `daemon-reload` + restart（需 root）。
+  - ② **主出口不通的归属（已定性）**：SSH 上 VPS（经 tailnet `100.118.65.105`）核实 xray 进程正常、`*:8443` 监听正常；本机两条线路对公网 IP 的 **TCP（22/8443）全部超时、ICMP 50% 丢、UDP 41641 直连正常** → 判定 GFW 对该 IP 的 **TCP 定向封锁**（11-13 对旧 IP 的同类事件；当日自愈过）。处置选项：等待自愈 / VPS 换端口 / 换 IP；封锁期间系统按 §6.11 靠 backup（tailnet）兜底运行，属设计内行为。
+  - ③ **xray DNS 兜底（实验后否决，未改动）**：两方案均被实测否决——境外 DoH 解析器 IP 直连被墙（方案 A 死）；国内 UDP 兜底会注入污染答案并经 geoip 分流静默劣化（方案 B 有实害，gstatic→direct 挂死连续复现后回滚）。详见 `xray-client/design.md` §6.12；同时记录 `vpnctl edit` 探针钉死主出口、主出口故障期 edit 结构性不可用的限制。附带新发现：主端口 gstatic 直连挂死的既有问题（待办）。
 
 **同期部署的临时调试件**：`~/.local/state/vpn/net-debug-watch.{sh,log}`（每 5 秒记录路由/DNS/ping，供断网后离线分析）已停用，文件保留待删（见 `../TODO.md` 待办 6 遗留收尾）。
 
@@ -406,6 +409,7 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 
 | 日期 | 改动 | 原因 |
 |------|------|------|
+| 2026-11-18（三） | 三项修复/排查：① tailscaled systemd drop-in 注入 `no_proxy`（tshttpproxy 不认 GNOME ignore-hosts 但认环境变量），DERP/控制面改直连，验证 ping 直连 111ms；② 主出口定性为 GFW 对新 IP 的 TCP 定向封锁（VPS 端监听/进程正常、本端两线 TCP 22/8443 全超时、UDP 直连正常）；③ xray DNS 兜底两方案实测否决（境外 DoH 直连被墙、UDP 兜底注污染→geoip→direct 挂死），配置未改动并恢复原状；新发现主端口 gstatic 直连挂死的既有问题；CHECKLIST 增两条检查项 | 用户授权"都做"；①依赖 `no_proxy` 环境变量的实验发现；②经 tailnet SSH 上 VPS 核实；③实害回退 |
 | 2026-11-18（二） | metric 700→500 当日执行当日回退（WiFi 优先恢复）；事件三增补根因：有线-only 全断 = "DNS/代理全收敛 tailnet + 蜂窝 UDP 阻断 + DERP 经 GNOME 代理 + xray 卡 backup" 的循环死锁；教训入 CHECKLIST.md；遗留 3 项待办 | 用户反馈有线-only 全断并要求回退；journal 12:21–16:17 窗口实证 |
 | 2026-11-18 | 事件三增补修订：`mifi-usb-test` 的 metric 700→500，USB 有线恢复优先线路、Wi-Fi 退为备用；回滚命令更新为改回 700 | 用户确认 M245/USB 网卡供电根因已解决，"压成备选"的前提失效；预检网关 30/30 零丢包（mdev 0.06ms）后执行 |
 | 2026-11-13（四） | 新增"2026-11-13（下午）"小节：twitter 卡顿定位（蜂窝抖动，测量表入库）、随身 WiFi 低电量/充电异常为物理根因（1 格→90% 后 mdev 91→26–51）、USB RNDIS 掉线拖死整机的根因与处置（新建 NM 配置 `mifi-usb-test`，MAC 匹配 + metric 700 压成备选）；TODO.md 待办 6 状态行的主备描述同步为定稿、遗留收尾补记 net-debug-watch 清理项 | 用户反馈 twitter 卡；上午"连随身 WiFi 就全断"根因查明（USB 网卡掉线震荡默认路由，与代理无关）；结论、测量方法与回滚命令入库防失忆 |
