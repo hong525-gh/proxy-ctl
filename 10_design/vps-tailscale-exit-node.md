@@ -398,7 +398,13 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 - **教训**：调整默认路由优先级前，必须先在目标拓扑下验证备用依赖链（UDP/DERP/系统 DNS）的数据面，而不是只 ping 网关。已录入 `CHECKLIST.md`。
 - **当日修复与排查（2026-11-18 晚，三项）**：
   - ① **tailscaled 绕过 GNOME 代理（已落地）**：实测 tailscale 的 `tshttpproxy` **不认 GNOME ignore-hosts**（设置后 netcheck 仍走代理），但**尊重环境变量 `no_proxy`**。落法：systemd drop-in `/etc/systemd/system/tailscaled.service.d/no-proxy.conf`（`Environment=no_proxy=.tailscale.com,.ts.net,.tailscale.io` + 同值 NO_PROXY）→ `daemon-reload` → restart。验证：重启后 tailscaled 日志 tshttpproxy 出现 0 次、`tailscale ping` 直连 111ms。DERP 直连实测：蜂窝有线仅 `derp20b`(103.6.84.152) 可达（426/3.36s），20d/20c 不通——derp20b 是有线-only 下 tailnet 的唯一活路。回滚：删除 drop-in + `daemon-reload` + restart（需 root）。
-  - ② **主出口不通的归属（已定性）**：SSH 上 VPS（经 tailnet `100.118.65.105`）核实 xray 进程正常、`*:8443` 监听正常；本机两条线路对公网 IP 的 **TCP（22/8443）全部超时、ICMP 50% 丢、UDP 41641 直连正常** → 判定 GFW 对该 IP 的 **TCP 定向封锁**（11-13 对旧 IP 的同类事件；当日自愈过）。**处置决策（2026-11-18 用户拍板）：不换 IP、不换端口，等待封锁自愈**；`AUTO_FAILOVER=1`（`~/.config/vpn/vpn.conf`，11-12 起）下 `vpnctl check` 每 3 分钟探针一次主出口（backup 模式下也持续探测主出口），探针转绿即自动切回主出口。切回静默完成（`NOTIFY=0`，无桌面通知），但必写 syslog（`journalctl -t vpn-health`）且 `vpnctl status` 可见；封锁期间系统按 §6.11 靠 backup（tailnet）兜底运行，属设计内行为。
+  - ② **主出口不通的归属（已定性）**：SSH 上 VPS（经 tailnet `100.118.65.105`）核实 xray 进程正常、`*:8443` 监听正常；本机两条线路对公网 IP 的 **TCP（22/8443）全部超时、ICMP 50% 丢、UDP 41641 直连正常** → 判定 GFW 对该 IP 的 **TCP 定向封锁**（11-13 对旧 IP 的同类事件；当日自愈过）。**封锁特征测定（2026-11-18 晚，有界探测，遵守"先 IP 字面量、不做端口段扫描"教训）**：
+  - **范围：段级，非单 IP**。`156.238.127.1:443`、`.216`（本机）、`.217:8443` 三个样本点 TCP 全部静默丢弃——服务商整段被拉黑的典型形态；
+  - **协议：仅 TCP**。TCP 全端口（80/443/22/8443）一律 timeout 而非 refused（RST 缺失 = 包在路中被丢，不是服务没开）；UDP（WireGuard 41641 直连 62–233ms）与 ICMP（6/6 全通）正常；
+  - **方向：入向过滤（回程丢）**。VPS 端 `ss -tn state syn-recv` 存在本机出口 `223.160.228.23` 的半开连接——SYN 去程到达、SYN-ACK 回程被丢，三次握手永远完不成。与 11-13"包进联通骨干后消失"（出向丢）的形态不同；
+  - **本机出国 TCP 基线正常**：阳性对照 derp20b（103.6.84.152:443）CONNECTED——封锁精确指向该段，不是全局出国 TCP 问题；
+  - tracepath 路径未完成（中段跳 221.183.x 中国移动骨干后不再应答），与 11-13 的逐跳定位法结论一致。
+  **处置决策（2026-11-18 用户拍板）：不换 IP、不换端口，等待封锁自愈**；`AUTO_FAILOVER=1`（`~/.config/vpn/vpn.conf`，11-12 起）下 `vpnctl check` 每 3 分钟探针一次主出口（backup 模式下也持续探测主出口），探针转绿即自动切回主出口。切回静默完成（`NOTIFY=0`，无桌面通知），但必写 syslog（`journalctl -t vpn-health`）且 `vpnctl status` 可见；封锁期间系统按 §6.11 靠 backup（tailnet）兜底运行，属设计内行为。**段级 + 全端口的特征意味着"换端口"同样无意义**；若等待不可接受，唯一可能立刻生效的替代是在 VPS 增加 UDP 类协议（该段 UDP 未被封锁的证据：WireGuard 41641 直连正常；其他端口 UDP 未测），属新部署动作，未经用户授权不实施。
   - ③ **xray DNS 兜底（实验后否决，未改动）**：两方案均被实测否决——境外 DoH 解析器 IP 直连被墙（方案 A 死）；国内 UDP 兜底会注入污染答案并经 geoip 分流静默劣化（方案 B 有实害，gstatic→direct 挂死连续复现后回滚）。详见 `xray-client/design.md` §6.12；同时记录 `vpnctl edit` 探针钉死主出口、主出口故障期 edit 结构性不可用的限制。附带新发现：主端口 gstatic 直连挂死的既有问题（待办）。
 
 **同期部署的临时调试件**：`~/.local/state/vpn/net-debug-watch.{sh,log}`（每 5 秒记录路由/DNS/ping，供断网后离线分析）已停用，文件保留待删（见 `../TODO.md` 待办 6 遗留收尾）。
@@ -409,6 +415,7 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 
 | 日期 | 改动 | 原因 |
 |------|------|------|
+| 2026-11-18（五） | 封锁特征测定入库：段级（.1/.216/.217 三样本全灭）、仅 TCP 全端口（timeout 非 refused）、入向过滤（VPS 端 syn-recv 半开连接 = SYN 去程通、SYN-ACK 回程丢）、出国 TCP 基线正常（derp20b 对照）；结论"换端口同样无意义"；提出 UDP 类协议为唯一可能立刻生效的替代（未授权不实施） | 用户要求弄清封锁特征与原因；探测遵守 11-13 教训（不做端口段扫描，样本点 3 个） |
 | 2026-11-18（四） | 主出口处置决策入库：不换 IP/端口、等自愈自动切回；核验自动切回链在位（`AUTO_FAILOVER=1` 在 `~/.config/vpn/vpn.conf`、`vpn-health.timer` 每 3 分钟跑 `vpnctl check`、backup 模式下持续探测主出口）；注明切回静默（NOTIFY=0），可查 journalctl -t vpn-health | 用户拍板"换 IP 不可能，等正门恢复自动切换"；核验中发现 systemd unit 无该开关曾误判，实为 vpn.conf 配置点 |
 | 2026-11-18（三） | 三项修复/排查：① tailscaled systemd drop-in 注入 `no_proxy`（tshttpproxy 不认 GNOME ignore-hosts 但认环境变量），DERP/控制面改直连，验证 ping 直连 111ms；② 主出口定性为 GFW 对新 IP 的 TCP 定向封锁（VPS 端监听/进程正常、本端两线 TCP 22/8443 全超时、UDP 直连正常）；③ xray DNS 兜底两方案实测否决（境外 DoH 直连被墙、UDP 兜底注污染→geoip→direct 挂死），配置未改动并恢复原状；新发现主端口 gstatic 直连挂死的既有问题；CHECKLIST 增两条检查项 | 用户授权"都做"；①依赖 `no_proxy` 环境变量的实验发现；②经 tailnet SSH 上 VPS 核实；③实害回退 |
 | 2026-11-18（二） | metric 700→500 当日执行当日回退（WiFi 优先恢复）；事件三增补根因：有线-only 全断 = "DNS/代理全收敛 tailnet + 蜂窝 UDP 阻断 + DERP 经 GNOME 代理 + xray 卡 backup" 的循环死锁；教训入 CHECKLIST.md；遗留 3 项待办 | 用户反馈有线-only 全断并要求回退；journal 12:21–16:17 窗口实证 |
