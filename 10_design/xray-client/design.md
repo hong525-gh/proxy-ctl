@@ -629,6 +629,38 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 
 ---
 
+### 6.12 xray 内部 DNS 在出口死亡时的行为（2026-11-18 实验定稿：不改动）
+
+**动机**：2026-11-18 有线-only 事故（见 `../vps-tailscale-exit-node.md` 当日修订段）暴露
+"xray 对非 cn 域名的解析走默认出站，tailnet 死则解析死"。本节记录两个候选方案的实测否决与最终决策。
+
+**方案 A（否决）：把 DoH 解析器 IP 钉到 direct。**
+实测（2026-11-18，联通两线路）：`1.1.1.1:443` TCP FAIL，`cloudflare-dns.com` / `dns.google`
+DoH 直连查询均无响应——境外公共 DoH 的 IP 直连本身被墙，钉 direct 等于把境外解析钉死。
+
+**方案 B（否决，有实害）：追加国内 UDP 兜底解析器（223.5.5.5）。**
+候选配置曾短暂上线（`vpnctl edit` 流程外手动安装），随即观测到：
+`www.gstatic.com` 的本地解析拿到 GFW 污染答案 → `geoip:cn` 命中 → 被路由到 `direct` → 连接挂死
+（journal `[socks -> direct]`，主端口连续 5 次复现）。UDP:53 兜底在主 DoH 抖动时会向境外域名
+注入污染答案，且与 geoip 分流叠加后**静默劣化**，比"解析失败"更危险。已回滚，live 配置与
+改动前逐字节一致（`backups/config-20261118-175623.json`）。
+
+**最终决策：不改动 DNS 配置。** 既有设计（cn → alidns DoH 直连；境外 → cloudflare DoH 经
+当前活跃出站；fail-closed，无 UDP 兜底）是正确的：tailnet 全死时境外本来无可用出口，
+解析失败与出口失败一致；cn 解析/直连始终独立存活。结构性修复由 tailscaled 直连承担
+（见 vps 文档 2026-11-18 修订段 ①）。
+
+**附带发现（遗留待办）**：主端口对 `www.gstatic.com` 等未入 geosite:google 规则的域名，
+本地解析偶发得到 CN 分类的答案（GFW 污染或 Google CN 边缘 IP）→ geoip 判 cn → direct → 挂死；
+而 `bk-in`/`probe-in` 因钉死出站规则把域名递给 VPS 远端解析，始终健康。修复方向（未实施）：
+为该类域名补 domain 规则，或改用远端解析（`sendThrough`/sniffing 策略调整）。
+
+**流程备注**：主出口被封锁期间 `vpnctl edit`/`rollback`/`restart` 的健康探针（`probe-in`
+钉死主出口）必然失败，edit 会自动回滚——属于 §6.5 在主出口故障期的已知限制；本次实验
+采用 `vpnctl validate` + 手动备份/安装/重启 + 主端口探测的偏离流程完成，偏差记录于 CHECKLIST.md。
+
+---
+
 ## 7. `vpnctl` 接口
 
 | 子命令 | 阶段 | 作用 | 退出码 |
