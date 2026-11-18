@@ -604,6 +604,15 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
   - backup 模式下主探针恢复 ok → 自动 `use primary` 并通知。
   - `AUTO_FAILOVER=1` 时 `AUTO_OFF` 不生效（有备用可切，关代理已无意义）。
 
+**2026-11-14 事故与修订（凌晨长流中断未被探针发现）**：00:11–06:41 窗口公网路径对
+长流（Telegram long-poll、codex 大上下文 SSE）大面积中断/SSL EOF，本机 xray 无对应报错
+（链路层抖动特征）；而 204 探针与 200KB CF 吞吐采样全程常绿，`AUTO_FAILOVER=1`（11-12 起
+即在 `~/.config/vpn/vpn.conf`）始终未被触发。同窗口 codex 挂起 turn 恢复后多代理重试风暴
+放大损害（应用层另案：fork 开关 + 看门狗）。教训：**探针必须逼近真实受害流的尺寸**。
+修订：`TP_CF_URL` 200KB→2MB（`~/.local/bin/vpnctl` 与本文档副本同步，备份
+`*.bak-20261114-tp2m`）；`TP_MAX_TIME=20`、`TP_INTERVAL_S=600` 不变。验收：改后
+`vpnctl check` 全绿、`tp_cf_kbps` 正常。
+
 **已知限制**：
 
 - 切换延迟：手动即时；自动最长约 6 分钟（2 轮 × 3 分钟）。

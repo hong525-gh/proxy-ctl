@@ -58,7 +58,9 @@ readonly BK_PROBE_URL="${BK_PROBE_URL:-https://www.gstatic.com/generate_204}"
 # per-flow throttle towards Cloudflare/Fastly (~38 KB/s) that the 204 probe could not
 # see. Measure one Cloudflare target (the WARP-routed direction) and one non-CF
 # reference; record KB/s and only complain after two consecutive slow samples.
-readonly TP_CF_URL="https://speed.cloudflare.com/__down?bytes=200000"
+# 2026-11-14: 200KB→2MB —— 凌晨事故：公网路径长流成片死亡而 200KB 小探针全程常绿（检测缺口），
+# 2MB 使 ~38KB/s 级限速/长流中断必然超时或低速采样（沿用"连续 2 次才处置"原则）。
+readonly TP_CF_URL="https://speed.cloudflare.com/__down?bytes=2000000"
 readonly TP_REF_URL="https://proof.ovh.net/files/1Mb.dat"
 readonly TP_MAX_TIME=20
 readonly TP_INTERVAL_S="${TP_INTERVAL_S:-600}"
