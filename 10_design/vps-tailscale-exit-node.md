@@ -387,6 +387,8 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 
 **事件三：USB RNDIS 网卡反复掉线拖死整机 → 压成备选路由**。M245 的 USB 网卡当日掉线 13 次（journal：`activated -> unmanaged/deactivating`，跨 3 次接口重枚举 enp0s20f0u1u3/u1u4/u4u2）。NetworkManager 给有线的默认 metric 100 优先于 Wi-Fi 的 600，每次掉线瞬间默认路由跟着震荡，整机（含国内直连）全断——上午"一连随身 WiFi 就全断"即此，与代理/Tailscale 无关。处置：新建 NM 配置 `mifi-usb-test`，按 MAC `AC:00:33:AA:96:33` 匹配（不绑接口名，重枚举后仍生效），`ipv4.method auto`、`ipv4.route-metric 700`、`ipv6.method disabled`；USB 路径从此排在 Wi-Fi（600）之后作纯备选，14:43 的一次掉线实测整机无感。回滚：`nmcli connection delete mifi-usb-test`。
 
+**修订（2026-11-18）：供电根因解除，有线恢复优先。** 用户确认 M245 供电问题已解决；预检网关 30/30 零丢包（mdev 0.06ms，优于 11-13 充电后的 26–51）、出公网 10/10（mdev 4.5ms）。`mifi-usb-test` 的 `ipv4.route-metric` 由 700 改为 500，USB 有线重新排在 Wi-Fi（600）之前作首选线路，Wi-Fi 退为备用；掉线即拖死整机的风险由 Wi-Fi 端承接（Wi-Fi 链路本身稳定）。回滚：`nmcli connection modify mifi-usb-test ipv4.route-metric 700 && nmcli connection up mifi-usb-test`。
+
 **同期部署的临时调试件**：`~/.local/state/vpn/net-debug-watch.{sh,log}`（每 5 秒记录路由/DNS/ping，供断网后离线分析）已停用，文件保留待删（见 `../TODO.md` 待办 6 遗留收尾）。
 
 ---
@@ -395,6 +397,7 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 
 | 日期 | 改动 | 原因 |
 |------|------|------|
+| 2026-11-18 | 事件三增补修订：`mifi-usb-test` 的 metric 700→500，USB 有线恢复优先线路、Wi-Fi 退为备用；回滚命令更新为改回 700 | 用户确认 M245/USB 网卡供电根因已解决，"压成备选"的前提失效；预检网关 30/30 零丢包（mdev 0.06ms）后执行 |
 | 2026-11-13（四） | 新增"2026-11-13（下午）"小节：twitter 卡顿定位（蜂窝抖动，测量表入库）、随身 WiFi 低电量/充电异常为物理根因（1 格→90% 后 mdev 91→26–51）、USB RNDIS 掉线拖死整机的根因与处置（新建 NM 配置 `mifi-usb-test`，MAC 匹配 + metric 700 压成备选）；TODO.md 待办 6 状态行的主备描述同步为定稿、遗留收尾补记 net-debug-watch 清理项 | 用户反馈 twitter 卡；上午"连随身 WiFi 就全断"根因查明（USB 网卡掉线震荡默认路由，与代理无关）；结论、测量方法与回滚命令入库防失忆 |
 | 2026-11-13（三） | 主备路径互换定稿：`proxy` → 公网 `156.238.127.216`、`proxy-backup` → tailnet `100.118.65.105`；§6.9 与 design.md §6.11 同步 | tailnet 主用在蜂窝网络下退化（常退 DERP 中转，延迟数倍）；公网主用更快更稳，tailnet 备用仍保防封锁价值 |
 | 2026-11-13（二） | §6.9 修订：备用出口由机场改为 VPS 公网路径（`proxy-backup` → `156.238.127.216:8443`，vless+REALITY）；`xray-client/design.md` §6.11 同步重写，`vpnctl` 状态行动态显示备用地址 | 用户决定机场到期不续、公网路径接任备用；实测公网路径更快（204 探针 0.4s vs 机场 2.5s）；`vpnctl use backup`/`use primary` 往返实测通过 |
