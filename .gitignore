@@ -1,3 +1,7 @@
+# Generated guides: they embed the live node parameters (UUID, REALITY keys, SNI, IPs)
+# and must never enter git history. See 10_design/xray-client/design.md 6.7.
+*.html
+
 # Editor / OS junk
 *.swp
 *.swo
@@ -8,6 +12,10 @@ Thumbs.db
 # Local backups made during install
 *.bak
 *.pre-proxyctl.bak
+
+# Local backups made before an edit (vpnctl.sh.bak-*, config.json.bak-*, ...)
+*.bak-*
+*.bak.*
 
 # Direnv / local overrides
 .envrc

@@ -1,0 +1,6 @@
+[Unit]
+Description=Probe the local VPN proxy and record health state
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/vpnctl check --quiet
