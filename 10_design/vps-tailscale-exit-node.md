@@ -387,7 +387,16 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 
 **事件三：USB RNDIS 网卡反复掉线拖死整机 → 压成备选路由**。M245 的 USB 网卡当日掉线 13 次（journal：`activated -> unmanaged/deactivating`，跨 3 次接口重枚举 enp0s20f0u1u3/u1u4/u4u2）。NetworkManager 给有线的默认 metric 100 优先于 Wi-Fi 的 600，每次掉线瞬间默认路由跟着震荡，整机（含国内直连）全断——上午"一连随身 WiFi 就全断"即此，与代理/Tailscale 无关。处置：新建 NM 配置 `mifi-usb-test`，按 MAC `AC:00:33:AA:96:33` 匹配（不绑接口名，重枚举后仍生效），`ipv4.method auto`、`ipv4.route-metric 700`、`ipv6.method disabled`；USB 路径从此排在 Wi-Fi（600）之后作纯备选，14:43 的一次掉线实测整机无感。回滚：`nmcli connection delete mifi-usb-test`。
 
-**修订（2026-11-18）：供电根因解除，有线恢复优先。** 用户确认 M245 供电问题已解决；预检网关 30/30 零丢包（mdev 0.06ms，优于 11-13 充电后的 26–51）、出公网 10/10（mdev 4.5ms）。`mifi-usb-test` 的 `ipv4.route-metric` 由 700 改为 500，USB 有线重新排在 Wi-Fi（600）之前作首选线路，Wi-Fi 退为备用；掉线即拖死整机的风险由 Wi-Fi 端承接（Wi-Fi 链路本身稳定）。回滚：`nmcli connection modify mifi-usb-test ipv4.route-metric 700 && nmcli connection up mifi-usb-test`。
+**修订（2026-11-18）：有线优先当日执行、当日回退；根因已查清。**
+- 17:28 按供电根因已解除的判断，将 `mifi-usb-test` 的 `ipv4.route-metric` 由 700 改为 500（预检网关 30/30 零丢包 mdev 0.06ms、出公网 10/10）。17:39 用户反馈"断开 WiFi、仅用有线时整机无法访问任何网站（国内外一律）"，遂回退 metric 700（WiFi 优先恢复）。
+- **根因（journal 12:21–16:17 无线-only 窗口实证）**：有线-only 时整机瘫痪不是链路问题（ICMP/直连公网均通），而是本机"DNS 与代理全部收敛于 tailnet"的结构性循环依赖——
+  1. 蜂窝有线链路 **UDP 被阻断**（`netcheck: UDP is blocked`）→ WireGuard 直连死，tailnet 只剩 DERP 中继；
+  2. tailscaled 经 **GNOME 系统代理**（manual → `127.0.0.1:10808`，`tshttpproxy: using proxy` 实证）发起 DERP/控制面连接；
+  3. 而 xray 因主出口 `156.238.127.216:8443` 从本机 TCP 不通（wifi/有线两路实测均 fail）**卡在 backup（默认出站 = proxy-backup = tailnet）**；
+  4. 于是 DERP→xray→tailnet→（需要 DERP）**循环死锁**；
+  5. 系统解析 = MagicDNS → 上游 `100.118.65.105`（走 tailnet）→ **全机 DNS 死**；xray 对非 cn 域名的 DoH（cloudflare，非规则命中 → 默认出站）也死。其他设备走 M245 自身 WiFi 无此依赖链，故正常。
+- **教训**：调整默认路由优先级前，必须先在目标拓扑下验证备用依赖链（UDP/DERP/系统 DNS）的数据面，而不是只 ping 网关。已录入 `CHECKLIST.md`。
+- **遗留待办**：① 主出口 8443 从本机两条线路均不通（11-13"定向封锁"同类，待 SSH 上 VPS 区分本端/对端）；② tailscaled 的 DERP/控制面应加入 GNOME 代理 ignore-hosts 走直连，打破循环；③ xray 默认出站不应是 backup（可考虑默认 direct，保证 tailnet 死时国内解析/直连仍活）。
 
 **同期部署的临时调试件**：`~/.local/state/vpn/net-debug-watch.{sh,log}`（每 5 秒记录路由/DNS/ping，供断网后离线分析）已停用，文件保留待删（见 `../TODO.md` 待办 6 遗留收尾）。
 
@@ -397,6 +406,7 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 
 | 日期 | 改动 | 原因 |
 |------|------|------|
+| 2026-11-18（二） | metric 700→500 当日执行当日回退（WiFi 优先恢复）；事件三增补根因：有线-only 全断 = "DNS/代理全收敛 tailnet + 蜂窝 UDP 阻断 + DERP 经 GNOME 代理 + xray 卡 backup" 的循环死锁；教训入 CHECKLIST.md；遗留 3 项待办 | 用户反馈有线-only 全断并要求回退；journal 12:21–16:17 窗口实证 |
 | 2026-11-18 | 事件三增补修订：`mifi-usb-test` 的 metric 700→500，USB 有线恢复优先线路、Wi-Fi 退为备用；回滚命令更新为改回 700 | 用户确认 M245/USB 网卡供电根因已解决，"压成备选"的前提失效；预检网关 30/30 零丢包（mdev 0.06ms）后执行 |
 | 2026-11-13（四） | 新增"2026-11-13（下午）"小节：twitter 卡顿定位（蜂窝抖动，测量表入库）、随身 WiFi 低电量/充电异常为物理根因（1 格→90% 后 mdev 91→26–51）、USB RNDIS 掉线拖死整机的根因与处置（新建 NM 配置 `mifi-usb-test`，MAC 匹配 + metric 700 压成备选）；TODO.md 待办 6 状态行的主备描述同步为定稿、遗留收尾补记 net-debug-watch 清理项 | 用户反馈 twitter 卡；上午"连随身 WiFi 就全断"根因查明（USB 网卡掉线震荡默认路由，与代理无关）；结论、测量方法与回滚命令入库防失忆 |
 | 2026-11-13（三） | 主备路径互换定稿：`proxy` → 公网 `156.238.127.216`、`proxy-backup` → tailnet `100.118.65.105`；§6.9 与 design.md §6.11 同步 | tailnet 主用在蜂窝网络下退化（常退 DERP 中转，延迟数倍）；公网主用更快更稳，tailnet 备用仍保防封锁价值 |
