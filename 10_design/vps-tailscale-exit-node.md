@@ -398,7 +398,7 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 - **教训**：调整默认路由优先级前，必须先在目标拓扑下验证备用依赖链（UDP/DERP/系统 DNS）的数据面，而不是只 ping 网关。已录入 `CHECKLIST.md`。
 - **当日修复与排查（2026-11-18 晚，三项）**：
   - ① **tailscaled 绕过 GNOME 代理（已落地）**：实测 tailscale 的 `tshttpproxy` **不认 GNOME ignore-hosts**（设置后 netcheck 仍走代理），但**尊重环境变量 `no_proxy`**。落法：systemd drop-in `/etc/systemd/system/tailscaled.service.d/no-proxy.conf`（`Environment=no_proxy=.tailscale.com,.ts.net,.tailscale.io` + 同值 NO_PROXY）→ `daemon-reload` → restart。验证：重启后 tailscaled 日志 tshttpproxy 出现 0 次、`tailscale ping` 直连 111ms。DERP 直连实测：蜂窝有线仅 `derp20b`(103.6.84.152) 可达（426/3.36s），20d/20c 不通——derp20b 是有线-only 下 tailnet 的唯一活路。回滚：删除 drop-in + `daemon-reload` + restart（需 root）。
-  - ② **主出口不通的归属（已定性）**：SSH 上 VPS（经 tailnet `100.118.65.105`）核实 xray 进程正常、`*:8443` 监听正常；本机两条线路对公网 IP 的 **TCP（22/8443）全部超时、ICMP 50% 丢、UDP 41641 直连正常** → 判定 GFW 对该 IP 的 **TCP 定向封锁**（11-13 对旧 IP 的同类事件；当日自愈过）。处置选项：等待自愈 / VPS 换端口 / 换 IP；封锁期间系统按 §6.11 靠 backup（tailnet）兜底运行，属设计内行为。
+  - ② **主出口不通的归属（已定性）**：SSH 上 VPS（经 tailnet `100.118.65.105`）核实 xray 进程正常、`*:8443` 监听正常；本机两条线路对公网 IP 的 **TCP（22/8443）全部超时、ICMP 50% 丢、UDP 41641 直连正常** → 判定 GFW 对该 IP 的 **TCP 定向封锁**（11-13 对旧 IP 的同类事件；当日自愈过）。**处置决策（2026-11-18 用户拍板）：不换 IP、不换端口，等待封锁自愈**；`AUTO_FAILOVER=1`（`~/.config/vpn/vpn.conf`，11-12 起）下 `vpnctl check` 每 3 分钟探针一次主出口（backup 模式下也持续探测主出口），探针转绿即自动切回主出口。切回静默完成（`NOTIFY=0`，无桌面通知），但必写 syslog（`journalctl -t vpn-health`）且 `vpnctl status` 可见；封锁期间系统按 §6.11 靠 backup（tailnet）兜底运行，属设计内行为。
   - ③ **xray DNS 兜底（实验后否决，未改动）**：两方案均被实测否决——境外 DoH 解析器 IP 直连被墙（方案 A 死）；国内 UDP 兜底会注入污染答案并经 geoip 分流静默劣化（方案 B 有实害，gstatic→direct 挂死连续复现后回滚）。详见 `xray-client/design.md` §6.12；同时记录 `vpnctl edit` 探针钉死主出口、主出口故障期 edit 结构性不可用的限制。附带新发现：主端口 gstatic 直连挂死的既有问题（待办）。
 
 **同期部署的临时调试件**：`~/.local/state/vpn/net-debug-watch.{sh,log}`（每 5 秒记录路由/DNS/ping，供断网后离线分析）已停用，文件保留待删（见 `../TODO.md` 待办 6 遗留收尾）。
@@ -409,6 +409,7 @@ DNS 面不工作）。升级到应用商店最新版后立刻恢复。
 
 | 日期 | 改动 | 原因 |
 |------|------|------|
+| 2026-11-18（四） | 主出口处置决策入库：不换 IP/端口、等自愈自动切回；核验自动切回链在位（`AUTO_FAILOVER=1` 在 `~/.config/vpn/vpn.conf`、`vpn-health.timer` 每 3 分钟跑 `vpnctl check`、backup 模式下持续探测主出口）；注明切回静默（NOTIFY=0），可查 journalctl -t vpn-health | 用户拍板"换 IP 不可能，等正门恢复自动切换"；核验中发现 systemd unit 无该开关曾误判，实为 vpn.conf 配置点 |
 | 2026-11-18（三） | 三项修复/排查：① tailscaled systemd drop-in 注入 `no_proxy`（tshttpproxy 不认 GNOME ignore-hosts 但认环境变量），DERP/控制面改直连，验证 ping 直连 111ms；② 主出口定性为 GFW 对新 IP 的 TCP 定向封锁（VPS 端监听/进程正常、本端两线 TCP 22/8443 全超时、UDP 直连正常）；③ xray DNS 兜底两方案实测否决（境外 DoH 直连被墙、UDP 兜底注污染→geoip→direct 挂死），配置未改动并恢复原状；新发现主端口 gstatic 直连挂死的既有问题；CHECKLIST 增两条检查项 | 用户授权"都做"；①依赖 `no_proxy` 环境变量的实验发现；②经 tailnet SSH 上 VPS 核实；③实害回退 |
 | 2026-11-18（二） | metric 700→500 当日执行当日回退（WiFi 优先恢复）；事件三增补根因：有线-only 全断 = "DNS/代理全收敛 tailnet + 蜂窝 UDP 阻断 + DERP 经 GNOME 代理 + xray 卡 backup" 的循环死锁；教训入 CHECKLIST.md；遗留 3 项待办 | 用户反馈有线-only 全断并要求回退；journal 12:21–16:17 窗口实证 |
 | 2026-11-18 | 事件三增补修订：`mifi-usb-test` 的 metric 700→500，USB 有线恢复优先线路、Wi-Fi 退为备用；回滚命令更新为改回 700 | 用户确认 M245/USB 网卡供电根因已解决，"压成备选"的前提失效；预检网关 30/30 零丢包（mdev 0.06ms）后执行 |
