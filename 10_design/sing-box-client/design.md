@@ -378,7 +378,7 @@ staging 不影响现有系统代理。回滚动作：
 - [x] 国内目标直连成功（baidu 200 ×3，journal 显示 `outbound/direct[direct]`）。
 - [x] IPv6 代理路径快速失败（IPv6 字面量经 socks 0.011s 被 SOCKS 拒绝）。
 - [x] 日志扫描未发现敏感值（scrub 过滤器上线后 12 个敏感值全部未命中；上线前的泄漏事件见证据文件）。
-- [x] staging 回滚后 xray 状态完全不变（xray 全程 active 且配置未动；staging 回滚 = 停止测试单元）。
+- [x] staging 回滚后 xray 状态完全不变（2026-11-19 回滚演练实测：停止测试单元后 xray 服务状态、10808～10811 监听、源配置 SHA256 与停止前逐项一致，staging 端口全部释放；恢复启动后探针 204）。
 
 ### 15.3 生产验收
 
@@ -433,3 +433,5 @@ staging 不影响现有系统代理。回滚动作：
 - 2026-11-19 — What: 新增 staging 实施文件 `config.template.json`、`singboxctl.sh`（install/generate/validate/run/status/check）、`sing-box-client-test.service`、`test_singboxctl.sh`、`README.md`；§7.1 增列 `geosite-private.srs`；§8 补「无 `resolve` 动作 = IP 规则不匹配域名」的实现机制。 | Why: 方案 B 进入 P1 staging 实施；私网域名直连需要 geosite-private；DNS 机制需与实现一致（§1 文档先行）。 | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/` 新增上述文件；`design.md` §7.1、§8、§17；规则集证据更新于 `~/.local/state/sing-box-client/upgrades/2026-11-19-source-baseline.md`。 | How: 生成器用 python3 内嵌实现，凭据只从 `~/.config/xray/config.json` 只读进入 `$XDG_RUNTIME_DIR`（0600）；真实配置实测 `validate` 全绿（final=proxy-backup 与当前 xray 模式一致），mock 离线测试 12/12；staging 不触碰 xray 与 10808～10811 (rollback: revert 本次提交并删除新增文件；运行态仅 tmpfs 配置，重启即消失)。
 
 - 2026-11-19 — What: staging 首轮实测并修复三个实测发现的问题：`run` 增加 journal scrub 过滤器（服务器地址→`srv-<hash12>`）、scrub 改行缓冲、`check` 默认出口探针从 gstatic 改为 `api.telegram.org`；§9.2 补 scrub 机制、§12.1 补 gstatic 直连陷阱注、§15.2 勾选首轮验收结果；新增离线测试 2 项（scrub 替换、慢生产者冲刷）。 | Why: 实测发现 sing-box 拨号失败会把服务器地址写进 journal（违反 §9.2）、块缓冲导致 journal 看不到运行日志、gstatic 命中 geosite-cn 导致默认出口探针失真；按 §6 要求修复并把检查固化进测试。 | Who: user instruction（“做吧，留痕”） -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/{singboxctl.sh,test_singboxctl.sh,design.md}`；证据 `~/.local/state/sing-box-client/staging/2026-11-19-first-run.md`。 | How: 本机实测（xray 全程未动，10808～10811 未触碰）；14/14 离线测试 + 真实配置 validate 全绿；blast radius 限 staging 端口与 tmpfs 配置；修复前 journal 旧条目含 proxy 服务器地址，保留并记录（rollback: revert 本次提交；staging 回滚 = `systemctl --user stop sing-box-client-test.service`）。
+
+- 2026-11-19 — What: §15.2 末项验收依据由推断升级为实测（回滚演练结果一句话）。 | Why: 验收项应有实测证据而非推断；演练结果已写入 `~/.local/state/sing-box-client/staging/2026-11-19-first-run.md` §5。 | Who: assistant executed. | When: 2026-11-19. | Where: `design.md` §15.2、§17。 | How: 停止/重启 staging 单元并做快照 diff；blast radius 仅文档 (rollback: revert 本次提交)。
