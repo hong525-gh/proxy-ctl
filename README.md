@@ -82,12 +82,17 @@ above plus "`no_proxy` really follows `ignore-hosts`" and
 
 - [DESIGN.md](DESIGN.md) — full design document (requirements,
   architecture, non-goals, scenario handling).
+- [xray-client design](10_design/xray-client/design.md) — the current
+  production proxy core design.
+- [sing-box client design](10_design/sing-box-client/design.md) — the
+  approved Scheme B design for a parallel sing-box client migration.
 - [proxy.sh](proxy.sh) — the script itself, ~110 lines of annotated
   Bash.
 - [test_proxy.sh](test_proxy.sh) — offline acceptance tests.
 
 ## Change Log
 
+- 2026-11-19 — What: added the approved sing-box Scheme B design under `10_design/sing-box-client/` and linked it with the xray Scheme A design. | Why: user approved a documented client-side sing-box + Tailscale migration before implementation. | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `README.md`, `10_design/xray-client/design.md`, and `10_design/sing-box-client/design.md`. | How: hand edit after protocol compatibility and project-architecture review; blast radius is documentation only (rollback: revert the `sing-box-client-design` merge commit).
 - 2026-11-19 — What: added `.opencode.ai`, `opencode.ai`, and `models.opencode.ai` to the local `no_proxy` exceptions and documented direct-first behavior without automatic proxy fallback. | Why: user confirmed that OpenCode works directly and wants to avoid proxy-related resets unless direct connectivity fails. | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `README.md`, `DESIGN.md`, `proxy.sh`, `test_proxy.sh`, and `~/.config/proxy-ctl/proxy.sh`. | How: updated documentation before code, added an offline assertion, and synchronized the verified script to the installed copy; blast radius is limited to OpenCode domain routing in newly started shells (rollback: restore `~/.config/proxy-ctl/proxy.sh.backup-20261119-direct-opencode-ai` and revert the `direct-opencode-ai` merge commit).
 
 ## License
