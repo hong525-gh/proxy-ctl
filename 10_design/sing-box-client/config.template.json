@@ -77,6 +77,16 @@
         "outbound": "direct"
       },
       {
+        "ip_cidr": ["100.64.0.0/10"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "domain_suffix": [".ts.net"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
         "rule_set": ["geosite-cn"],
         "action": "route",
         "outbound": "direct"

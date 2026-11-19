@@ -137,7 +137,7 @@ staging 与生产使用同一套角色、两组端口。staging 只用于验证�
    - `probe-in → proxy`；
    - `bk-in → proxy-backup`。
 2. UDP 443（QUIC）快速失败，避免应用在被 QoS 的 UDP 路径上挂起。
-3. 私网 IP 与私网域名直连。
+3. 私网 IP 与私网域名直连。**显式包含 CGNAT `100.64.0.0/10`（Tailscale tailnet 段）**：sing-box 的 `ip_is_private` 只覆盖 RFC1918，不含 CGNAT；xray 旧配置靠显式 CIDR 规则直连 tailnet。漏掉这一条会让访问本机/peer 的 tailnet 服务绕 VPS 发夹（2026-11-19 实测：访问本机 tailnet 地址的 quiz 服务经 `proxy-backup` 绕行，耗时从直连级升到 3.5s+，并出现 5 分钟级长连接挂代理）。MagicDNS 域名（`.ts.net` 后缀）同样直连。
 4. 国内 IP 与国内域名直连。
 5. 代理路径只允许 IPv4：国内和内网 IPv6 仍直连，其余 IPv6 在规则阶段快速失败。
 6. 未匹配流量走当前默认出口（`proxy` 或 `proxy-backup`）。
@@ -431,6 +431,8 @@ staging 不影响现有系统代理。回滚动作：
 5. 只有在客户端方案 B 稳定后，才讨论 VPS 服务端是否也迁移到 sing-box。
 
 ## 17. 变更记录
+
+- 2026-11-19 — What: 修复 tailnet 流量误入代理——模板在 `ip_is_private` 后显式新增 `ip_cidr 100.64.0.0/10 → direct` 与 `domain_suffix .ts.net → direct` 两条 route rule；§7 第 3 条改写为显式要求；`test_singboxctl.sh` 结构断言新增 tailnet/ts.net direct 一项。 | Why: 生产实测 `http://100.105.202.118:8080/quiz` 变慢（3.19s+），journal 显示请求经 `proxy-backup` 绕 VPS 发夹回本机；根因是 `ip_is_private` 不含 CGNAT `100.64.0.0/10`，SB-R7 实现遗漏。 | Who: user report -> assistant executed. | When: 2026-11-19 22:14. | Where: `10_design/sing-box-client/{config.template.json,test_singboxctl.sh,design.md}`；证据 `~/.local/state/sing-box-client/cutover/2026-11-19-tailnet-direct-fix.md`。 | How: 文档先行（§7 先改）再改模板与测试；16/16 测试 + production validate 全绿后重启 `sing-box-client.service`；实测 quiz 0.189s 且 journal 显示 `outbound/direct[direct]`；blast radius 限 sing-box 路由表 (rollback: revert 本次提交并重启服务，或 `vpnctl on` 整体回退 xray)。
 
 - 2026-11-19 — What: 创建方案 B 设计基线，明确 Fedora 客户端迁移到 sing-box、VPS xray 不变、Tailscale 仅作备用网络路径、staging 与生产端口分离、运行时凭据放用户级 tmpfs。 | Why: 用户确认“sing-box + Tailscale”方向并要求先构建方案文档、全程留痕。 | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/design.md`。 | How: 依据项目现有 xray/VPS/Tailscale 文档与 sing-box 官方 mixed/VLESS/REALITY 文档手工编写；blast radius 仅限仓库文档，不改变运行中代理 (rollback: revert the `sing-box-client-design` merge commit)。
 
