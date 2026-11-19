@@ -153,7 +153,14 @@ xray 的 `geoip.dat` / `geosite.dat` 不直接作为 sing-box 的运行时输入
 - 更新是显式动作，失败保留旧文件；
 - 离线测试验证国内/内网规则确实命中 `direct`。
 
-确切的 rule-set 文件名与 URL 在实施时按当时的官方文档核定，不凭记忆写入配置。若官方格式或来源发生变化，先修订本文档，再实施。
+2026-11-19 已按官方文档核定（证据：`~/.local/state/sing-box-client/upgrades/2026-11-19-source-baseline.md`）：
+
+- 格式：`binary`（`.srs`），配置用 `type: "local"`，不用 remote 自动更新；
+- `geoip-cn.srs`：`https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs`；
+- `geosite-cn.srs`：`https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs`；
+- 「UDP 443 快速失败」与「IPv6 代理路径快速失败」均用 route rule 的 `"action": "reject"`（默认 method：TCP 回 RST、UDP 回 ICMP port unreachable），不引入 `block` 出站；xray 侧的 `block` tag 只在源配置读取阶段保留，不进入 sing-box 配置。
+
+若官方格式或来源发生变化，先修订本文档，再实施。
 
 ## 8. DNS 策略
 
@@ -243,6 +250,8 @@ sing-box 的实际运行配置由本地生成器生成：
 7. 不自动检查更新，不追最新。
 
 如果官方最新版本发布未满 60 天，就在实施当日重新查询 Releases 并选择符合规则的最近稳定版；选择结果与证据写入 `~/.local/state/sing-box-client/upgrades/`。
+
+2026-11-19 核定结果：当时最新稳定版 1.14.4（2026-10-11）、1.14.3（2026-10-03）、1.14.2（2026-09-22）均未满 60 天，1.15.0 系列全为 alpha；选定 **1.14.1**（2026-09-15 发布，已满 65 天，stable）。完整证据（下载 URL、SHA256、核定过程）见 `~/.local/state/sing-box-client/upgrades/2026-11-19-source-baseline.md`。
 
 ### 11.2 规则集
 
@@ -408,3 +417,5 @@ staging 不影响现有系统代理。回滚动作：
 ## 17. 变更记录
 
 - 2026-11-19 — What: 创建方案 B 设计基线，明确 Fedora 客户端迁移到 sing-box、VPS xray 不变、Tailscale 仅作备用网络路径、staging 与生产端口分离、运行时凭据放用户级 tmpfs。 | Why: 用户确认“sing-box + Tailscale”方向并要求先构建方案文档、全程留痕。 | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/design.md`。 | How: 依据项目现有 xray/VPS/Tailscale 文档与 sing-box 官方 mixed/VLESS/REALITY 文档手工编写；blast radius 仅限仓库文档，不改变运行中代理 (rollback: revert the `sing-box-client-design` merge commit)。
+
+- 2026-11-19 — What: 在 §7.1 补入已核定的规则集确切 URL/格式（SagerNet 官方 `rule-set` 分支 `.srs` 二进制，`type: "local"`）与「快速失败 = route rule `reject` 动作」的写法；在 §11.1 补入版本核定结果（选定 sing-box 1.14.1）。 | Why: 按 §7.1/§11.1 自己的约定，实施时必须以当日官方 Releases 与官方文档实测核定来源，不凭记忆；1.14.2～1.14.4 发布未满 60 天，1.15.0 系列全为 alpha。 | Who: user instruction（“按思路做，留痕”） -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/design.md` §7.1、§11.1、§17；证据文件 `~/.local/state/sing-box-client/upgrades/2026-11-19-source-baseline.md`。 | How: GitHub Releases API（逐 tag 查询）+ releases.atom + 官方文档站核定，HEAD 验证后下载 .srs 并计算 SHA256；blast radius 仅限文档，不改运行中 xray (rollback: revert 本次提交)。
