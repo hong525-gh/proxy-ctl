@@ -221,7 +221,7 @@ sing-box 的实际运行配置由本地生成器生成：
 ├── config.template.json              # 无凭据配置模板
 ├── singboxctl.sh                     # 安装、生成、校验、开关、状态、主备切换
 ├── sing-box-client-test.service      # staging user service
-├── sing-box-client.service           # 生产 user service（验收后加入）
+├── sing-box-client.service           # 生产 user service（2026-11-19 切换时加入）
 ├── sing-box-health.service           # 健康探测单元（验收后加入）
 ├── sing-box-health.timer             # 健康探测定时器（验收后加入）
 └── test_singboxctl.sh                # 离线验收测试
@@ -294,6 +294,10 @@ staging 阶段只做显式 `singboxctl check`，不启用自动 failover，不�
 5. 日志与 journal 中未发现敏感值；
 6. xray 当前配置与二进制未改变，回滚路径可用；
 7. staging 至少完成一轮有记录的观察；观察时长在验收记录中写明。
+
+> 偏差记录（2026-11-19）：staging 首轮实测完成当天，用户明确指示「直接切换」，
+> 第 7 条的观察期条件由用户决策覆盖；staging 实测记录即第 0 轮观察
+> （时长约 1.5 小时，见 §15.2 证据文件）。其余 6 条全部满足后执行切换。
 
 ### 12.3 生产健康检查
 

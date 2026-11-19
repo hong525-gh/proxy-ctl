@@ -1,0 +1,13 @@
+[Unit]
+Description=sing-box client (production, ports 10808-10811)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=SINGBOXCTL_PROFILE=production
+ExecStart=%h/Desktop/20_AREAS/proxy-ctl/10_design/sing-box-client/singboxctl.sh run
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

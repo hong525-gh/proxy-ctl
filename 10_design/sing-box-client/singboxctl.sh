@@ -15,8 +15,17 @@ readonly STATE_DIR="$HOME/.local/state/sing-box-client"
 readonly RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sing-box-client"
 readonly TEST_SERVICE="sing-box-client-test.service"
 
-# staging tag -> port (production 10808-10811 stays owned by xray until cutover)
+# tag -> port per profile. staging (18080-18083) coexists with xray;
+# production (10808-10811) takes over the xray ports at cutover.
 readonly STAGING_PORTS="socks=18080 ts-in=18081 probe-in=18082 bk-in=18083"
+readonly PRODUCTION_PORTS="socks=10808 ts-in=10809 probe-in=10810 bk-in=10811"
+readonly PROFILE="${SINGBOXCTL_PROFILE:-staging}"
+case $PROFILE in
+  staging)    PROFILE_PORTS="$STAGING_PORTS" ;;
+  production) PROFILE_PORTS="$PRODUCTION_PORTS" ;;
+  *)          echo "error: unknown profile: $PROFILE" >&2; exit 2 ;;
+esac
+readonly PROFILE_PORTS
 
 PROBE_204_URL="${PROBE_204_URL:-https://www.gstatic.com/generate_204}"
 TS_PROBE_URL="${TS_PROBE_URL:-https://api.telegram.org/}"
@@ -44,7 +53,7 @@ die() { echo "error: $*" >&2; exit 1; }
 
 port_of() {
   local tag="$1" pair
-  for pair in $STAGING_PORTS; do
+  for pair in $PROFILE_PORTS; do
     [[ $pair == "$tag="* ]] && { echo "${pair#*=}"; return 0; }
   done
   die "unknown staging tag: $tag"
@@ -66,7 +75,8 @@ cmd_install() {
 cmd_generate() {
   install -d -m 0700 "$RUNTIME_DIR"
   SB_XRAY_CONFIG="$XRAY_CONFIG" SB_TEMPLATE="$TEMPLATE" SB_RULESET_DIR="$RULESET_DIR" \
-  SB_RUNTIME_FILE="$RUNTIME_DIR/config-staging.json" \
+  SB_RUNTIME_FILE="$RUNTIME_DIR/config-$PROFILE.json" \
+  SB_PROFILE_PORTS="$PROFILE_PORTS" \
   python3 - <<'PYEOF'
 import hashlib
 import json
@@ -151,6 +161,13 @@ for tag in ("proxy", "proxy-backup", "proxy-ts"):
 
 config["outbounds"] = outbounds
 
+profile_ports = dict(p.split("=") for p in os.environ["SB_PROFILE_PORTS"].split())
+for ib in config["inbounds"]:
+    tag = ib.get("tag")
+    if tag not in profile_ports:
+        sys.exit("error: template inbound %r is not in the profile port map" % tag)
+    ib["listen_port"] = int(profile_ports[tag])
+
 for rs in config["route"]["rule_set"]:
     rs["path"] = rs["path"].replace("__RULESET_DIR__", ruleset_dir)
 config["route"]["final"] = first_proxy_tag
@@ -185,8 +202,8 @@ PYEOF
 
 cmd_validate() {
   cmd_generate
-  local cfg="$RUNTIME_DIR/config-staging.json"
-  SB_RUNTIME_FILE="$cfg" SB_XRAY_CONFIG="$XRAY_CONFIG" SB_STAGING_PORTS="$STAGING_PORTS" \
+  local cfg="$RUNTIME_DIR/config-$PROFILE.json"
+  SB_RUNTIME_FILE="$cfg" SB_XRAY_CONFIG="$XRAY_CONFIG" SB_PROFILE_PORTS="$PROFILE_PORTS" \
   python3 - <<'PYEOF'
 import json
 import os
@@ -202,7 +219,7 @@ def check(cond, msg):
     if not cond:
         errors.append(msg)
 
-expected_ports = dict(p.split("=") for p in os.environ["SB_STAGING_PORTS"].split())
+expected_ports = dict(p.split("=") for p in os.environ["SB_PROFILE_PORTS"].split())
 
 inbounds = {i["tag"]: i for i in config["inbounds"]}
 check(set(inbounds) == set(expected_ports), "inbound tags mismatch: %s" % sorted(inbounds))
@@ -272,7 +289,7 @@ PYEOF
 cmd_scrub() {
   # fd 3 keeps the caller's stdin (the log stream); python's own stdin is the
   # heredoc carrying the program, so it cannot double as the data channel.
-  python3 - "$RUNTIME_DIR/config-staging.json" 3<&0 <<'PYEOF'
+  python3 - "$RUNTIME_DIR/config-$PROFILE.json" 3<&0 <<'PYEOF'
 import hashlib
 import json
 import sys
@@ -299,12 +316,16 @@ PYEOF
 
 cmd_run() {
   cmd_validate
-  exec "$BIN_CURRENT" run -c "$RUNTIME_DIR/config-staging.json" > >(cmd_scrub) 2>&1
+  exec "$BIN_CURRENT" run -c "$RUNTIME_DIR/config-$PROFILE.json" > >(cmd_scrub) 2>&1
 }
 
 cmd_status() {
-  systemctl --user is-active "$TEST_SERVICE" 2>/dev/null || echo "inactive"
-  ss -ltn 2>/dev/null | awk 'NR==1 || /:1808[0-3] /' || true
+  local svc="$TEST_SERVICE"
+  [[ $PROFILE == production ]] && svc="sing-box-client.service"
+  systemctl --user is-active "$svc" 2>/dev/null || echo "inactive"
+  local pair ports_re
+  ports_re=$(for pair in $PROFILE_PORTS; do printf ':%s$|', "${pair#*=}"; done | sed 's/|$//')
+  ss -ltn 2>/dev/null | grep -E "$ports_re" || echo "no $PROFILE listeners"
 }
 
 cmd_check() {

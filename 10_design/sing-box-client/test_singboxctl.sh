@@ -170,6 +170,33 @@ grep -q 'srv-[0-9a-f]\{12\}:8443' "$TMP/scrub-stream.out" 2>/dev/null \
   || bad "scrub flushes per line before EOF"
 wait $stream_pid 2>/dev/null
 
+# --- production profile maps tags to the xray ports ------------------------------
+prod_out=$(SINGBOXCTL_PROFILE=production SINGBOXCTL_XRAY_CONFIG="$TMP/xray-backup-first.json" \
+  bash "$REPO/singboxctl.sh" generate 2>&1) || prod_out=""
+if python3 - "$XDG_RUNTIME_DIR/sing-box-client/config-production.json" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1]) as fh:
+    c = json.load(fh)
+expected = {"socks": 10808, "ts-in": 10809, "probe-in": 10810, "bk-in": 10811}
+inbounds = {i["tag"]: i for i in c["inbounds"]}
+assert set(inbounds) == set(expected), inbounds.keys()
+for tag, port in expected.items():
+    assert inbounds[tag]["listen"] == "127.0.0.1"
+    assert inbounds[tag]["listen_port"] == port, (tag, inbounds[tag]["listen_port"])
+assert c["route"]["final"] == "proxy-backup"
+PYEOF
+then
+  ok "production profile maps tags to 10808-10811"
+else
+  bad "production profile maps tags to 10808-10811"
+fi
+
+SINGBOXCTL_PROFILE=bogus bash "$REPO/singboxctl.sh" generate >/dev/null 2>&1 \
+  && bad "unknown profile is rejected" \
+  || ok "unknown profile is rejected"
+
 # --- missing outbound is a hard error ----------------------------------------
 python3 - "$TMP/xray-broken.json" <<'PYEOF'
 import json
