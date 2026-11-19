@@ -4,72 +4,28 @@
 
 ---
 
-## 待办 6：服务商切换新 IP 段后的迁移（2026-11-13 已完成主体，剩收尾）
+## 待办 6：服务商切换新 IP 段后的迁移（2026-11-13 主体完成，2026-11-19 收尾后仅剩一项）
 
-**状态**：**主体完成（2026-11-13）**。新 IP `156.238.127.216` 已上线并持久化；本机主备路径已定稿（同日 14:21 互换）：主 `proxy` → 公网 `156.238.127.216:8443`，备 `proxy-backup` → tailnet `100.118.65.105:8443`，往返切换实测全绿（详见 `10_design/xray-client/design.md` §6.11）。
-**遗留收尾**：
-1. 旧 IP `207.56.18.51/24` 仍挂在 VPS eth0 过渡，待服务商正式退役旧段后从 netplan 删除（文件 `/etc/netplan/00-installer-config.yaml`，删除对应地址项即可）；
-2. `~/.local/state/vpn/vps-watch.sh` 监视任务已于 11-12 停止（进程已杀），文件保留未改——确认不再需要时可删；同类遗留：11-13 下午部署的临时调试记录器 `~/.local/state/vpn/net-debug-watch.{sh,log}`（已停用）一并处理；
-3. 手机/平板节点配置（待办 6 原表第 6 项）：它们走 exit node（tailnet IP 未变），无需改动，已核实无需操作。
+**状态**：**主体完成**，全过程与验证记录已入库（`10_design/xray-client/design.md` §6.11、`10_design/vps-tailscale-exit-node.md` §6.8/§6.9），原 5W1H 清单随之退役（2026-11-19 从本文件删除）。
+
+**仅剩一项收尾（外部依赖，等服务商）**：
+- 旧 IP `207.56.18.51/24` 仍挂在 VPS eth0 过渡（2026-11-19 经 tailnet SSH 实测确认仍在：`ip -4 addr show eth0` 同时有新旧两个 /24）。待服务商正式退役旧段后，从 `/etc/netplan/00-installer-config.yaml` 删除对应地址项并 `netplan apply`（VPS 有 `config.json.bak-20261113` 与 netplan `.bak-20261113` 备份）。
+
+**已收尾（2026-11-19）**：停用的 `vps-watch.{sh,log}` 与 `net-debug-watch.{sh,log}` 已移入 `~/.local/state/vpn/attic-20261119/`（未删除，需要时可取回）。
+
 **建立日期**：2026-11-12
-
-### What（要达成什么）
-
-拿到新 IPv4 后，把所有引用旧公网 IP `207.56.18.51` 的地方一次性切过去，并做全量验证。
-**tailnet IP（100.118.65.105）不变**，Tailscale 侧零操作（tailscaled 状态文件不受影响，无需重新授权）。
-
-### Why
-
-旧段国际方向被上游中断且可能直接弃用；所有指向旧 IP 的配置在切换瞬间全部失效，漏改一处就是下一次故障。
-
-### Who
-
-- **你**：收服务商切换通知、执行面板操作（若有）、把新 IP 发给我。
-- **我**：改配置、验证、更新文档与监视。
-
-### When
-
-服务商发布切换安排后尽快；切换前本机继续跑机场备用（`AUTO_FAILOVER` 已兜底）。
-
-### Where（引用旧 IP 的完整清单，切换时逐项打勾）
-
-| # | 位置 | 改什么 |
-|---|------|--------|
-| 1 | 本机 `~/.ssh/config`（Host `hong`） | HostName → 新 IP |
-| 2 | 本机 `~/.config/xray/config.json` | `proxy` 出站的 `address`（`proxy-ts` 指向 tailnet IP，**不用改**） |
-| 3 | 本机 `~/.local/state/vpn/vps-watch.sh` | 探测目标 → 新 IP（或直接停掉该后台任务） |
-| 4 | 文档 `10_design/vps-tailscale-exit-node.md` | 全文 IP 引用（§1 清单、§6 手册、§6.8） |
-| 5 | VPS 侧（切换后 SSH 验证） | 确认 xray 监听 8443、ufw 仍放行、tailscaled 自动上线、dnsproxy/warp 正常（均不依赖公网 IP 值，预期零改动） |
-| 6 | 手机/平板节点配置（若直连 VPS 而非 exit node） | 节点地址同步 |
-
-### How
-
-1. 拿到新 IP 先测可达：`ping -c 4 <新IP>`、`nc -zv -w 5 <新IP> 22`（应通；若不通先找服务商）。
-2. 按上表 1→3 改本机；`vpnctl validate && systemctl --user restart xray-client`。
-3. 等 `vpn-health.timer` 探到主出口恢复 → `AUTO_FAILOVER` 自动切回 primary（`vpnctl status` 的 `failover` 行应变回 primary，exit IP 变为新 IP）。
-4. SSH 上新 IP 做服务端体检（设计文档 §6「服务端快速体检」五条）。
-5. 全绿后更新文档与变更记录；`AUTO_FAILOVER` 保留（备用出口长期有效）。
-
-### 验收标准
-
-- `vpnctl status`：`failover: primary`、health ok、exit = 新 IP；`egress`/`backup` 行正常；
-- SSH（新 IP）、手机 exit node、Telegram（公网路径）全部可用；
-- `vpnctl use backup` / `use primary` 手动往返各一次成功（验证 failover 机制在新 IP 下仍工作）。
-
-### 回滚
-
-配置改动均有 `~/.local/state/vpn/backups/` 时间戳备份；`vpnctl rollback` 一键回退；旧 IP 若恢复，`~/.ssh/config` 与 `proxy` 出站地址改回即可。
 
 ---
 
 ## 待办 1：向服务商咨询/申请这台 VPS 的 IPv6，并在拿到后完成配置与收尾
 
 **状态**：待你跟进（面板/工单需要你的账号；不阻塞当前使用，临时方案已生效）
+**现状更新（2026-11-19）**：实例主公网 IP 已换为 `156.238.127.216`（旧 `207.56.18.51` 过渡中，见待办 6 收尾）；生产客户端已从 xray 切换为 sing-box（xray 转为回滚路径），届时「撤掉客户端临时措施」需同时评估 sing-box 侧的 IPv6 行为，第 5 步的 xray 操作只适用于回滚路径。
 **建立日期**：2026-11-03
 
 ### What（要达成什么）
 
-拿到 LightLayer 为实例 `207.56.18.51`（HK-VP02-A，tailnet 名 `vm-z4ziutm3`）分配的 IPv6 地址/前缀与网关，配到 VPS 的 netplan 上并验证连通，然后把客户端的两个临时措施撤掉：
+拿到 LightLayer 为实例 `156.238.127.216`（HK-VP02-A，tailnet 名 `vm-z4ziutm3`）分配的 IPv6 地址/前缀与网关，配到 VPS 的 netplan 上并验证连通，然后把客户端的两个临时措施撤掉：
 
 1. 删除本机 xray 路由里的 IPv6 catch-all 规则（2026-11-09 起是 `ip: ["::/0"] → block`，
    取代了原先手写的五个前缀）；
@@ -96,7 +52,7 @@
 | 位置 | 说明 |
 |---|---|
 | LightLayer 面板 / 工单 | 查看或申请 IPv6；产品页 `https://lightlayer.net/` |
-| VPS `vm-z4ziutm3`（`207.56.18.51`，`100.118.65.105`） | 配置文件 `/etc/netplan/00-installer-config.yaml`（当前只有 IPv4 段） |
+| VPS `vm-z4ziutm3`（`156.238.127.216`，`100.118.65.105`） | 配置文件 `/etc/netplan/00-installer-config.yaml`（当前只有 IPv4 段） |
 | 本机 | `~/.config/xray/config.json`（拦截规则）、`/etc/gai.conf`、`~/.local/bin/vpnctl`（IPv6 探针） |
 | 文档 | `10_design/vps-tailscale-exit-node.md` 的「2026-11-03 IPv6 复测结论」 |
 
@@ -116,7 +72,7 @@ ssh hong 'ip -6 addr show eth0; ip -6 route show default'
 
 **第 2 步：若面板没有 → 开工单**（可直接复制）
 
-> Hello, this instance (IPv4 207.56.18.51, HK-VP02-A) has no IPv6: `ip -6 addr` shows only link-local, no RA is received with `accept_ra=2`, and a DHCPv6 solicit gets no reply. Your plans are advertised as supporting dual-stack IPv6 — could you please assign an IPv6 address/prefix and gateway to this instance, or tell me where to enable it in the panel?
+> Hello, this instance (IPv4 156.238.127.216, HK-VP02-A) has no IPv6: `ip -6 addr` shows only link-local, no RA is received with `accept_ra=2`, and a DHCPv6 solicit gets no reply. Your plans are advertised as supporting dual-stack IPv6 — could you please assign an IPv6 address/prefix and gateway to this instance, or tell me where to enable it in the panel?
 
 **第 3 步：拿到地址后配置（我执行）**
 
@@ -171,6 +127,7 @@ vpnctl check    # 期望 ipv6 : ok；status 的 guard 行应显示 absent
 ## 待办 2：把“模式切换”做成配置档，而不是每次手改 JSON
 
 **状态**：未开始（2026-11-09 评估后暂缓，理由见 How）
+**现状更新（2026-11-19）**：生产客户端已切换 sing-box，xray 转为回滚路径（`vpnctl on` 可恢复）。本项的前提（xray 是日常客户端）已变化：若仍需要配置档，应在 sing-box / `singboxctl` 上重新评估，而不是给回滚路径的 xray 增加新功能。
 **建立日期**：2026-11-09
 **来源**：sing-box 配置生成器把 Direct / GFWList / Non-CN / Global 四种模式装进同一份配置，客户端运行时用 `clash_mode` 切换；本机只有一种行为，换行为 = 改 JSON + 重启，而这正是 2026-11-04 宕机的那条路径。
 
@@ -204,30 +161,9 @@ vpnctl check    # 期望 ipv6 : ok；status 的 guard 行应显示 absent
 
 ---
 
-## 待办 3：用 debug 日志确认 xray 的 `dns` 模块到底有没有在客户端解析路径上
+## ~~待办 3：用 debug 日志确认 xray 的 `dns` 模块到底有没有在客户端解析路径上~~（已完成，条目退役）
 
-**状态**：待验证（结论目前是推断）
-**建立日期**：2026-11-09
-**来源**：对比 sing-box 生成器时发现：本机 `routing.domainStrategy = "AsIs"`、无 TUN，客户端由 systemd-resolved（192.168.0.1）解析，freedom 出站按域名拨号 —— 照文档推断 `dns` 模块对客户端查询不起作用。若属实，那份七条的 `dns.servers` 配置是“策略写在了不生效的地方”。
-
-### What
-
-用一次带 access log 的临时实例（换端口、不动线上服务、临时配置 0600 用完即删）确认：有没有 `inboundTag: dns-module` 的连接；直连域名由系统解析还是 dns 模块解析。
-
-### Why
-
-决定两件事：(a) `dns` 段要不要继续维护/扩写；(b) 是否值得投入做一层 DNS 应答（sing-box TUN 或本地解析器），因为只有那一层才能实现“被墙域名不被污染”和“走代理只给 A 记录”。
-
-### How
-
-1. 复制线上配置到 0600 临时文件，改端口 18081、加 `"log": {"loglevel": "debug", "access": "/tmp/xray-access.log"}`。
-2. 前台跑 30 秒，用 `curl -x` 访问一个直连域名和一个代理域名。
-3. 看 access log：目标是域名还是 IP、有没有 dns-module 记录。
-4. 结论写进 `10_design/vps-tailscale-exit-node.md` §7；临时文件删除。
-
-### 回滚
-
-不接触线上服务与配置；临时文件用完即删。
+**状态**：**已完成（2026-11-09），2026-11-19 条目退役**。该实验即待办 4.4：临时实例 access log 实测 `dns-module` 出现 0 次、目标一律以域名形式记录，决策 A1（冻结 `dns` 段、承认纯域名分流）。过程、证据与决策全文见下方待办 4.4；另注：2026-11-19 起生产客户端为 sing-box，xray 的 `dns` 段问题随回滚路径一并冻结。
 
 ---
 
@@ -311,42 +247,12 @@ vpnctl check    # 期望 ipv6 : ok；status 的 guard 行应显示 absent
 - **内容**：在 `127.0.0.1` 开 Xray 统计接口，让 `vpnctl` 能回答“多少流量走了 `proxy-ts` / `proxy`”。
 - **依据**：项目可选 Clash API 观察连接走向；我们目前只能靠 `ss` 猜。
 - **实现方法**：加 `api`/`stats`/`policy` 段，`vpnctl stats` 子命令查询并格式化；需确认 26.3.27 的 stats 字段名。
-- **状态**：**暂缓**——4.1 的探针已经能覆盖“这条路通不通”，统计属于“有更好”；等需要长期观测双出口比例时再做。
+- **状态**：**暂缓**——4.1 的探针已经能覆盖“这条路通不通”，统计属于“有更好”；等需要长期观测双出口比例时再做。（2026-11-19 注：xray 已转为回滚路径，本项价值进一步降低，维持暂缓。）
 - **验证 / 回滚**：同上，配置备份 + 删除段落。
 
 ---
 
-## 待办 5：`ts.net → 199.247.155.53` 的归属（结论：无法也不需要删除）
+## 变更记录
 
-**状态**：已关闭（2026-11-09，用 Tailscale API 核实）
-**建立日期**：2026-11-09
-
-### 结论
-
-这条记录**不是**用户添加的 Split DNS，而是 **Tailscale 自己下发的**：它是 `ts.net` 域名的公网权威服务器
-（DNSimple，IPv4 `199.247.155.53` + IPv6 `2620:111:8007::53` 两条一起出现），随 MagicDNS 一起下发给每台设备，
-并且在设备使用 exit node 时由 `ExitNodeFilteredSet`（含 `.ts.net`、`.tailscale.net`）排除，不会把 MagicDNS 名字送进隧道。
-所以后台里找不到它、也没有可删的条目。
-
-### 证据（2026-11-09）
-
-| 检查 | 结果 |
-|---|---|
-| `GET /api/v2/tailnet/-/dns/split-dns` | `{}`（用户没有配置任何受限解析器） |
-| `GET /api/v2/tailnet/-/dns/config` | `resolvers: [100.118.65.105]`、`routes: null`、`domains: null`、`proxied: true` |
-| `tailscale dns status --json`（Fedora 与 VPS 一致） | `SplitDNSRoutes: {"ts.net.": [199.247.155.53, 2620:111:8007::53]}`、`SearchDomains: ["tail61cf19.ts.net"]`、`ExitNodeFilteredSet: [".ts.net", ".tailscale.net"]` |
-
-API 里 `domains: null` 而客户端有 `SearchDomains: tail61cf19.ts.net`——两者对比说明：**API 反映的是“用户配置”，
-客户端拿到的是“用户配置 + MagicDNS 自动条目”**。`ts.net` 的路由和搜索域都属于后者。
-
-### 影响
-
-- 设备名（`*.tail61cf19.ts.net`）由 MagicDNS 在本地解析，`100.100.100.100` 能返回正确地址；这条路由只服务**非设备**的
-  `*.ts.net` 名字（跨 tailnet 解析），属正常设计。
-- 退出节点场景下它被过滤，不参与解析。
-
-### 如果当初确实在后台加过
-
-那它已经被删掉或从未保存成功；当前 API 显示用户配置为空，后台 `console.tailscale.com/admin/dns` 里也不会有可删的行。
-**不需要再做任何操作。**
+- 2026-11-19 — What: 待办 6 主体与收尾项（旧 IP 待服务商退役除外）标记完成并删除原 5W1H 清单；待办 3 标记完成退役（与 4.4 重复）；待办 5 已关闭条目删除、结论迁入 `10_design/vps-tailscale-exit-node.md` §6.10；待办 1/2/4.7 补「sing-box 已上生产」现状注；待办 1 的实例 IP 引用更新为 `156.238.127.216`；停用脚本移入 `~/.local/state/vpn/attic-20261119/`；本文件新增本变更记录节。 | Why: 用户指示——已完成的待办该删就删（如 IP 更换），其他过期内容一并更新。 | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `TODO.md`；`10_design/vps-tailscale-exit-node.md` §6.10 与行「同期部署的临时调试件」；`~/.local/state/vpn/attic-20261119/`。 | How: 逐项核对实际状态（tailnet SSH 实测旧 IP 仍在 eth0、本地脚本进程早已停止）后编辑；脚本移动非删除，可取回；blast radius 限文档与 state 目录 (rollback: revert 本次提交；脚本从 attic 移回)。
 
