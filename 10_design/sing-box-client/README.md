@@ -38,6 +38,23 @@ tmpfs），凭据只从 `~/.config/xray/config.json` 只读提取，不落地第
 staging 回滚：`systemctl --user stop sing-box-client-test.service`，
 xray 全程未被触碰。
 
+## 生产（2026-11-19 切换后）
+
+生产 profile 复用同一模板，按 tag 映射到 10808～10811（与 xray 原布局一致，
+系统代理与既有探针无需改动）：
+
+```bash
+SINGBOXCTL_PROFILE=production bash singboxctl.sh validate    # 离线校验生产配置
+systemctl --user link $PWD/sing-box-client.service
+systemctl --user start sing-box-client.service               # 切换时先 vpnctl off
+SINGBOXCTL_PROFILE=production bash singboxctl.sh status
+SINGBOXCTL_PROFILE=production bash singboxctl.sh check
+```
+
+生产回滚：`systemctl --user stop sing-box-client.service && vpnctl on`
+（xray 配置原样保留，`vpnctl on` 内部会启动 xray 并恢复 GNOME manual）。
+生成器从 xray 配置派生 `route.final`，回滚路径与生产共用同一事实源。
+
 ## 测试
 
 ```bash

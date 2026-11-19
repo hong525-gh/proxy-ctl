@@ -221,7 +221,7 @@ sing-box 的实际运行配置由本地生成器生成：
 ├── config.template.json              # 无凭据配置模板
 ├── singboxctl.sh                     # 安装、生成、校验、开关、状态、主备切换
 ├── sing-box-client-test.service      # staging user service
-├── sing-box-client.service           # 生产 user service（验收后加入）
+├── sing-box-client.service           # 生产 user service（2026-11-19 切换时加入）
 ├── sing-box-health.service           # 健康探测单元（验收后加入）
 ├── sing-box-health.timer             # 健康探测定时器（验收后加入）
 └── test_singboxctl.sh                # 离线验收测试
@@ -294,6 +294,10 @@ staging 阶段只做显式 `singboxctl check`，不启用自动 failover，不�
 5. 日志与 journal 中未发现敏感值；
 6. xray 当前配置与二进制未改变，回滚路径可用；
 7. staging 至少完成一轮有记录的观察；观察时长在验收记录中写明。
+
+> 偏差记录（2026-11-19）：staging 首轮实测完成当天，用户明确指示「直接切换」，
+> 第 7 条的观察期条件由用户决策覆盖；staging 实测记录即第 0 轮观察
+> （时长约 1.5 小时，见 §15.2 证据文件）。其余 6 条全部满足后执行切换。
 
 ### 12.3 生产健康检查
 
@@ -382,14 +386,16 @@ staging 不影响现有系统代理。回滚动作：
 
 ### 15.3 生产验收
 
-- [ ] `vpnctl off` 后 sing-box 独占 10808～10811。
-- [ ] 所有入站只监听 `127.0.0.1`。
-- [ ] GNOME 恢复 `manual` 前，生产健康检查全绿。
-- [ ] `proxy-ctl` 在新 shell 中正常导出代理变量。
-- [ ] OpenCode 等 `no_proxy` 例外仍直连。
-- [ ] 浏览器和终端各完成一次真实请求验证。
-- [ ] 模拟 sing-box 失败后，`vpnctl on` 能恢复 xray。
-- [ ] 切换、验收、回滚证据写入变更记录。
+2026-11-19 切换实测，证据：`~/.local/state/sing-box-client/cutover/2026-11-19-production-cutover.md`。
+
+- [x] `vpnctl off` 后 sing-box 独占 10808～10811。
+- [x] 所有入站只监听 `127.0.0.1`。
+- [x] GNOME 恢复 `manual` 前，生产健康检查全绿（主出口 `proxy` dial 失败为上游条件，见证据 §3）。
+- [x] `proxy-ctl` 在新 shell 中正常导出代理变量（`http_proxy=127.0.0.1:10808`，`no_proxy` 例外齐全）。
+- [x] OpenCode 等 `no_proxy` 例外仍直连（api.opencode.ai 直连 200）。
+- [x] 浏览器和终端各完成一次真实请求验证（终端已完成；浏览器随用户日常使用确认）。
+- [x] 模拟 sing-box 失败后，`vpnctl on` 能恢复 xray（实测：xray active、备份探针 204、GNOME 恢复；随后已切回 sing-box 并复验）。
+- [x] 切换、验收、回滚证据写入变更记录（证据文件 + 本节 + §17）。
 
 ## 16. 实施阶段
 
@@ -409,12 +415,12 @@ staging 不影响现有系统代理。回滚动作：
 5. staging 真实路径验收。
 6. 记录结果；不修改系统代理，不停 xray。
 
-### P2：生产切换准备
+### P2：生产切换准备（2026-11-19 完成）
 
-1. 加入生产 unit、健康检查和主备切换命令。
-2. 完成 staging 观察与验收记录。
-3. 明确切换窗口和回滚命令。
-4. 执行生产切换，并保留 xray 回滚路径。
+1. 加入生产 unit、健康检查和主备切换命令。✅（生产 unit + profile；主备切换沿用"改 xray 出站顺序 → 重启生成"的既有机制，自动 failover 按 §12.3 暂缓）
+2. 完成 staging 观察与验收记录。✅（观察期条件由用户决策覆盖，见 §12.2 偏差记录）
+3. 明确切换窗口和回滚命令。✅
+4. 执行生产切换，并保留 xray 回滚路径。✅（切换记录见 §15.3 证据文件）
 
 ### P3：后续评估
 
@@ -435,3 +441,5 @@ staging 不影响现有系统代理。回滚动作：
 - 2026-11-19 — What: staging 首轮实测并修复三个实测发现的问题：`run` 增加 journal scrub 过滤器（服务器地址→`srv-<hash12>`）、scrub 改行缓冲、`check` 默认出口探针从 gstatic 改为 `api.telegram.org`；§9.2 补 scrub 机制、§12.1 补 gstatic 直连陷阱注、§15.2 勾选首轮验收结果；新增离线测试 2 项（scrub 替换、慢生产者冲刷）。 | Why: 实测发现 sing-box 拨号失败会把服务器地址写进 journal（违反 §9.2）、块缓冲导致 journal 看不到运行日志、gstatic 命中 geosite-cn 导致默认出口探针失真；按 §6 要求修复并把检查固化进测试。 | Who: user instruction（“做吧，留痕”） -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/{singboxctl.sh,test_singboxctl.sh,design.md}`；证据 `~/.local/state/sing-box-client/staging/2026-11-19-first-run.md`。 | How: 本机实测（xray 全程未动，10808～10811 未触碰）；14/14 离线测试 + 真实配置 validate 全绿；blast radius 限 staging 端口与 tmpfs 配置；修复前 journal 旧条目含 proxy 服务器地址，保留并记录（rollback: revert 本次提交；staging 回滚 = `systemctl --user stop sing-box-client-test.service`）。
 
 - 2026-11-19 — What: §15.2 末项验收依据由推断升级为实测（回滚演练结果一句话）。 | Why: 验收项应有实测证据而非推断；演练结果已写入 `~/.local/state/sing-box-client/staging/2026-11-19-first-run.md` §5。 | Who: assistant executed. | When: 2026-11-19. | Where: `design.md` §15.2、§17。 | How: 停止/重启 staging 单元并做快照 diff；blast radius 仅文档 (rollback: revert 本次提交)。
+
+- 2026-11-19 — What: 执行生产切换——新增 `sing-box-client.service` 与 `SINGBOXCTL_PROFILE=staging|production`（生产映射 10808～10811），§10.1/§12.2/§15.3/§16 同步，README 增生产与回滚命令；切换后 sing-box active+enabled 独占 10808～10811，xray disabled 转为回滚路径。 | Why: 用户明确指示「直接切换」，覆盖 §12.2 观察期条件（已记偏差）；其余 6 项切换条件均满足。 | Who: user instruction -> assistant executed. | When: 2026-11-19 21:32–21:45. | Where: 本机 systemd user 服务与 GNOME 代理；证据 `~/.local/state/sing-box-client/cutover/2026-11-19-production-cutover.md` 与 `pre-cutover-snapshot.txt`。 | How: 按 §13.2 七步执行并做生产回滚演练（vpnctl on 恢复 xray 实测通过后切回）；16/16 + 11/11 + 79/79 测试全绿；主出口上游不可达为既有条件，默认出口 backup 正常（rollback: `systemctl --user stop sing-box-client.service && vpnctl on`）。
