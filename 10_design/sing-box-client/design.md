@@ -158,6 +158,7 @@ xray 的 `geoip.dat` / `geosite.dat` 不直接作为 sing-box 的运行时输入
 - 格式：`binary`（`.srs`），配置用 `type: "local"`，不用 remote 自动更新；
 - `geoip-cn.srs`：`https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs`；
 - `geosite-cn.srs`：`https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs`；
+- `geosite-private.srs`：`https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-private.srs`（承载"私网域名直连"）；
 - 「UDP 443 快速失败」与「IPv6 代理路径快速失败」均用 route rule 的 `"action": "reject"`（默认 method：TCP 回 RST、UDP 回 ICMP port unreachable），不引入 `block` 出站；xray 侧的 `block` tag 只在源配置读取阶段保留，不进入 sing-box 配置。
 
 若官方格式或来源发生变化，先修订本文档，再实施。
@@ -177,6 +178,12 @@ v1 复制当前 xray 配置的**有效行为**，而不是复制没有被流量�
 理由：xray 方案中已经实测，国内 UDP 兜底可能给境外域名注入污染答案并触发错误的 geoip 直连；境外 DoH 直连也可能本身不可达。v1 不重复引入这两个已否决方案。
 
 如果 sing-box 的 DNS/路由行为与上述目标不一致，先记录差异并修订本节，不得用未验证的 DNS 配置直接进入生产。
+
+实现机制（2026-11-19 依据官方 Rule Action 文档核定）：sing-box 的目标地址只有被显式 `resolve` 动作解析成 IP 之后，IP 类规则才能匹配域名请求；v1 的路由规则**不使用 `resolve` 动作**，因此：
+
+- 域名请求只可能被域名类规则（geosite）命中；未匹配的域名原样交给 `route.final` 的 VLESS 出站，由 VPS 远端解析——等价于 xray `domainStrategy: AsIs`，不会为路由判断在本地解析境外域名，规避已否决的污染注入路径；
+- 字面 IP 请求直接命中 `ip_is_private` / `geoip-cn` 规则；
+- `direct` 出站拨打国内域名时使用系统解析器（DNS 模块只配 `type: "local"` 服务器），与 xray freedom 出站的有效行为一致。
 
 ## 9. 凭据与运行时配置
 
@@ -419,3 +426,5 @@ staging 不影响现有系统代理。回滚动作：
 - 2026-11-19 — What: 创建方案 B 设计基线，明确 Fedora 客户端迁移到 sing-box、VPS xray 不变、Tailscale 仅作备用网络路径、staging 与生产端口分离、运行时凭据放用户级 tmpfs。 | Why: 用户确认“sing-box + Tailscale”方向并要求先构建方案文档、全程留痕。 | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/design.md`。 | How: 依据项目现有 xray/VPS/Tailscale 文档与 sing-box 官方 mixed/VLESS/REALITY 文档手工编写；blast radius 仅限仓库文档，不改变运行中代理 (rollback: revert the `sing-box-client-design` merge commit)。
 
 - 2026-11-19 — What: 在 §7.1 补入已核定的规则集确切 URL/格式（SagerNet 官方 `rule-set` 分支 `.srs` 二进制，`type: "local"`）与「快速失败 = route rule `reject` 动作」的写法；在 §11.1 补入版本核定结果（选定 sing-box 1.14.1）。 | Why: 按 §7.1/§11.1 自己的约定，实施时必须以当日官方 Releases 与官方文档实测核定来源，不凭记忆；1.14.2～1.14.4 发布未满 60 天，1.15.0 系列全为 alpha。 | Who: user instruction（“按思路做，留痕”） -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/design.md` §7.1、§11.1、§17；证据文件 `~/.local/state/sing-box-client/upgrades/2026-11-19-source-baseline.md`。 | How: GitHub Releases API（逐 tag 查询）+ releases.atom + 官方文档站核定，HEAD 验证后下载 .srs 并计算 SHA256；blast radius 仅限文档，不改运行中 xray (rollback: revert 本次提交)。
+
+- 2026-11-19 — What: 新增 staging 实施文件 `config.template.json`、`singboxctl.sh`（install/generate/validate/run/status/check）、`sing-box-client-test.service`、`test_singboxctl.sh`、`README.md`；§7.1 增列 `geosite-private.srs`；§8 补「无 `resolve` 动作 = IP 规则不匹配域名」的实现机制。 | Why: 方案 B 进入 P1 staging 实施；私网域名直连需要 geosite-private；DNS 机制需与实现一致（§1 文档先行）。 | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/` 新增上述文件；`design.md` §7.1、§8、§17；规则集证据更新于 `~/.local/state/sing-box-client/upgrades/2026-11-19-source-baseline.md`。 | How: 生成器用 python3 内嵌实现，凭据只从 `~/.config/xray/config.json` 只读进入 `$XDG_RUNTIME_DIR`（0600）；真实配置实测 `validate` 全绿（final=proxy-backup 与当前 xray 模式一致），mock 离线测试 12/12；staging 不触碰 xray 与 10808～10811 (rollback: revert 本次提交并删除新增文件；运行态仅 tmpfs 配置，重启即消失)。

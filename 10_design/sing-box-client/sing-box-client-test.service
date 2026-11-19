@@ -1,0 +1,12 @@
+[Unit]
+Description=sing-box client (staging, ports 18080-18083, coexists with xray)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/Desktop/20_AREAS/proxy-ctl/10_design/sing-box-client/singboxctl.sh run
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

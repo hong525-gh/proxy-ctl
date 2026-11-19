@@ -1,0 +1,116 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "local"
+      }
+    ],
+    "final": "local"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "socks",
+      "listen": "127.0.0.1",
+      "listen_port": 18080
+    },
+    {
+      "type": "mixed",
+      "tag": "ts-in",
+      "listen": "127.0.0.1",
+      "listen_port": 18081
+    },
+    {
+      "type": "mixed",
+      "tag": "probe-in",
+      "listen": "127.0.0.1",
+      "listen_port": 18082
+    },
+    {
+      "type": "mixed",
+      "tag": "bk-in",
+      "listen": "127.0.0.1",
+      "listen_port": 18083
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": ["ts-in"],
+        "action": "route",
+        "outbound": "proxy-ts"
+      },
+      {
+        "inbound": ["probe-in"],
+        "action": "route",
+        "outbound": "proxy"
+      },
+      {
+        "inbound": ["bk-in"],
+        "action": "route",
+        "outbound": "proxy-backup"
+      },
+      {
+        "network": ["udp"],
+        "port": [443],
+        "action": "reject"
+      },
+      {
+        "rule_set": ["geosite-private"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "ip_is_private": true,
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": ["geosite-cn"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": ["geoip-cn"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "ip_version": 6,
+        "action": "reject"
+      }
+    ],
+    "rule_set": [
+      {
+        "type": "local",
+        "tag": "geoip-cn",
+        "format": "binary",
+        "path": "__RULESET_DIR__/geoip-cn.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-cn",
+        "format": "binary",
+        "path": "__RULESET_DIR__/geosite-cn.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-private",
+        "format": "binary",
+        "path": "__RULESET_DIR__/geosite-private.srs"
+      }
+    ],
+    "final": "__FINAL_OUTBOUND__"
+  }
+}
