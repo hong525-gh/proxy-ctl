@@ -27,14 +27,14 @@ _pc_apply() {
     # xray 10808 是 HTTP+SOCKS 混合入站，故三类协议可指向同一 endpoint。
     local url="http://$1:$2"
     local socks="socks5://$1:$2"
-    # no_proxy 的唯一来源是 GNOME 的 ignore-hosts（2026-11-09 起，之前这里硬编码了
+    # no_proxy 以 GNOME 的 ignore-hosts 为基础（2026-11-09 起，之前这里硬编码了
     # 一份与系统设置不同的列表，DESIGN.md 却写着“复用 ignore-hosts”，文档与实现分叉）。
-    # 只在上面追加本机才知道的例外：kimi.com 相关域名 —— dsh 调 Kimi 走本地 xray 跳
-    # 频繁被 RST（晚高峰约半数请求 3-11 秒内 Connection error），国内端点本就该直连。
+    # 只在上面追加本机才知道的例外：kimi.com 相关域名走本地 xray 跳频繁被 RST；
+    # opencode.ai 已实测可直连，默认直连以减少代理链路引入的中断，不做自动代理回退。
     # 显式子域名是为了兼容不做后缀匹配的 no_proxy 实现（部分 Node/Go 客户端只认全等
     # 或前导点）。.local 是 mDNS 局域网名，GNOME 的 ignore-hosts 不覆盖它，本地才知道。
     local ignore="$3"
-    local extra=".local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com"
+    local extra=".local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com,.opencode.ai,opencode.ai,models.opencode.ai"
     if [[ -n "$ignore" ]]; then
         ignore="$ignore,$extra"
     else
