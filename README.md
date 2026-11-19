@@ -12,8 +12,10 @@ Every time you open a new interactive Bash shell, `proxy.sh`:
 2. If it's `manual` **and** the configured host:port is reachable,
    exports `http_proxy` / `https_proxy` / `all_proxy` (+ uppercase
    variants) and `no_proxy`. `no_proxy` is built from GNOME's
-   `ignore-hosts`, with only the local exceptions appended (`.local`
-   and the kimi.com names).
+   `ignore-hosts`, with only the local exceptions appended (`.local`,
+   the kimi.com names, and the opencode.ai names). OpenCode uses a
+   direct connection by default; there is no automatic proxy fallback
+   when that direct connection fails.
 3. Otherwise, unsets all of them so the shell goes direct.
 4. Only prints anything (to `stderr`) when the state is anomalous —
    e.g. system proxy is on but the port is dead.
@@ -58,8 +60,8 @@ https_proxy=http://127.0.0.1:10808
 HTTPS_PROXY=http://127.0.0.1:10808
 all_proxy=socks5://127.0.0.1:10808
 ALL_PROXY=socks5://127.0.0.1:10808
-no_proxy=localhost,127.0.0.0/8,::1,.local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com
-NO_PROXY=localhost,127.0.0.0/8,::1,.local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com
+no_proxy=localhost,127.0.0.0/8,::1,.local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com,.opencode.ai,opencode.ai,models.opencode.ai
+NO_PROXY=localhost,127.0.0.0/8,::1,.local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com,.opencode.ai,opencode.ai,models.opencode.ai
 ```
 
 Turn off system proxy in GNOME Settings → open a fresh terminal →
@@ -83,6 +85,10 @@ above plus "`no_proxy` really follows `ignore-hosts`" and
 - [proxy.sh](proxy.sh) — the script itself, ~110 lines of annotated
   Bash.
 - [test_proxy.sh](test_proxy.sh) — offline acceptance tests.
+
+## Change Log
+
+- 2026-11-19 — What: added `.opencode.ai`, `opencode.ai`, and `models.opencode.ai` to the local `no_proxy` exceptions and documented direct-first behavior without automatic proxy fallback. | Why: user confirmed that OpenCode works directly and wants to avoid proxy-related resets unless direct connectivity fails. | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `README.md`, `DESIGN.md`, `proxy.sh`, `test_proxy.sh`, and `~/.config/proxy-ctl/proxy.sh`. | How: updated documentation before code, added an offline assertion, and synchronized the verified script to the installed copy; blast radius is limited to OpenCode domain routing in newly started shells (rollback: restore `~/.config/proxy-ctl/proxy.sh.backup-20261119-direct-opencode-ai` and revert the `direct-opencode-ai` merge commit).
 
 ## License
 

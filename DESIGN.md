@@ -187,8 +187,8 @@ exec 3<&- 3>&-
 
 xray 在 10808 是 HTTP+SOCKS 混合入站，因此三类变量都可以指向同一 endpoint。
 
-`no_proxy` 只有一个来源：GNOME 的 `ignore-hosts`（每次开终端现读），只在后面追加
-本机才知道的例外（kimi 相关域名）。2026-11-09 之前这里硬编码了一份与系统设置不同的
+`no_proxy` 以 GNOME 的 `ignore-hosts`（每次开终端现读）为基础，只在后面追加
+本机才知道的例外（kimi 与 opencode 相关域名）。2026-11-09 之前这里硬编码了一份与系统设置不同的
 列表，而本文却写着“复用 ignore-hosts”，是文档与实现分叉的实例。
 
 ```bash
@@ -197,7 +197,7 @@ _pc_apply() {
     local url="http://$1:$2"
     local socks="socks5://$1:$2"
     local ignore="$3"
-    local extra=".local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com"
+    local extra=".local,.kimi.com,kimi.com,api.kimi.com,code.kimi.com,auth.kimi.com,telemetry-logs.kimi.com,.opencode.ai,opencode.ai,models.opencode.ai"
     if [[ -n "$ignore" ]]; then
         ignore="$ignore,$extra"
     else
@@ -237,8 +237,9 @@ _pc_clear() {
 ```
 
 - **必须同时 unset 大小写两套**。本机当前环境里就残留着 `HTTPS_PROXY=`（空串），是这个坑的现成证据。
-- `no_proxy` 读 GNOME 的 `ignore-hosts`，因此“系统代理例外”只有一个事实来源；要加例外就改 GNOME 设置，不要改脚本。
-- 追加的 kimi 例外是**本机才知道的**事实（国内端点经本地 xray 跳会被 RST），写在 `_pc_apply` 一处。
+- `no_proxy` 读 GNOME 的 `ignore-hosts`，系统代理例外由 GNOME 设置提供；本机额外的直连例外集中写在 `_pc_apply` 一处。
+- 追加的 kimi 例外是**本机才知道的**事实（国内端点经本地 xray 跳会被 RST）。
+- `opencode.ai` 已实测可直连，因此 `opencode.ai` 及其子域名默认直连，以减少代理链路引入的中断。只有直连不可用时才人工考虑代理；脚本不检测直连质量，也不自动回退到代理。
 
 ---
 
@@ -291,3 +292,4 @@ _pc_clear() {
 - DNS-over-proxy（`http_proxy` 不代理 DNS 查询，DNS 仍走系统解析）
 - 有自己代理配置的工具（`git`、`npm`、`apt`、`docker`、`pip.conf` 等），若它们优先级高于环境变量，本脚本无能为力
 - 节点切换、订阅更新、流量统计等 v2rayN GUI 已经提供的功能
+- 检测 `opencode.ai` 直连质量并在失败时自动回退到代理

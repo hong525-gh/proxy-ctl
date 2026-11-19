@@ -3,8 +3,9 @@
 #
 # No network, no real GNOME: `gsettings` is mocked by a script that reads fixtures from
 # $TMP/state, and the "xray port" is a throwaway python listener. Verifies the three
-# behaviours DESIGN.md promises, plus the two rules added on 2026-11-09:
+# behaviours DESIGN.md promises, plus the rules added on 2026-11-09 and 2026-11-19:
 #   - no_proxy is built from GNOME's ignore-hosts, with only the local exceptions appended;
+#   - the local exceptions include the direct-by-default OpenCode domains;
 #   - a non-interactive shell is left completely untouched.
 
 set -uo pipefail
@@ -81,6 +82,8 @@ NO_PROXY_LINE=$(sed -n 's/^no_proxy=//p' <<<"$OUT")
   && ok "no_proxy starts with GNOME ignore-hosts" || bad "no_proxy does not reuse ignore-hosts: $NO_PROXY_LINE"
 [[ $NO_PROXY_LINE == *",.kimi.com,kimi.com,api.kimi.com"* ]] \
   && ok "no_proxy appends the local kimi exceptions" || bad "kimi exceptions missing: $NO_PROXY_LINE"
+[[ $NO_PROXY_LINE == *",.opencode.ai,opencode.ai,models.opencode.ai"* ]] \
+  && ok "no_proxy appends the direct-by-default OpenCode exceptions" || bad "OpenCode exceptions missing: $NO_PROXY_LINE"
 [[ $NO_PROXY_LINE != *"127.0.0.0/8,127.0.0.0/8"* ]] \
   && ok "no_proxy has no duplicated ignore-hosts entry" || bad "duplicate entry in no_proxy"
 
