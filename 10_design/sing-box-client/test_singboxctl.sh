@@ -119,8 +119,8 @@ echo "$gen_out2" | grep -q 'route.final: proxy (derived' \
   || bad "proxy-first xray order yields route.final=proxy"
 
 # --- structure of the generated config ---------------------------------------
-python3 - "$cfg" <<'PYEOF' && ok "staging ports, pins, no block outbound, no 0.0.0.0" \
-                          || bad "staging ports, pins, no block outbound, no 0.0.0.0"
+python3 - "$cfg" <<'PYEOF' && ok "staging ports, pins, no block outbound, no 0.0.0.0, tailnet direct" \
+                          || bad "staging ports, pins, no block outbound, no 0.0.0.0, tailnet direct"
 import json
 import sys
 
@@ -145,6 +145,12 @@ actions = [(r.get("network"), r.get("port"), r.get("action"), r.get("ip_version"
            for r in c["route"]["rules"]]
 assert any(a == "reject" and p == [443] for _, p, a, _ in actions), "quic reject missing"
 assert any(a == "reject" and v == 6 for _, _, a, v in actions), "ipv6 reject missing"
+
+# tailnet CGNAT and MagicDNS must go direct (ip_is_private does not cover 100.64/10)
+cidr_rules = [r for r in c["route"]["rules"] if "100.64.0.0/10" in r.get("ip_cidr", [])]
+assert cidr_rules and cidr_rules[0]["outbound"] == "direct", "tailnet direct missing"
+ts_rules = [r for r in c["route"]["rules"] if ".ts.net" in r.get("domain_suffix", [])]
+assert ts_rules and ts_rules[0]["outbound"] == "direct", "ts.net direct missing"
 PYEOF
 
 # --- scrub replaces server addresses ------------------------------------------
