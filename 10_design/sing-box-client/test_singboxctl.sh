@@ -147,6 +147,29 @@ assert any(a == "reject" and p == [443] for _, p, a, _ in actions), "quic reject
 assert any(a == "reject" and v == 6 for _, _, a, v in actions), "ipv6 reject missing"
 PYEOF
 
+# --- scrub replaces server addresses ------------------------------------------
+scrubbed=$(printf 'ERROR connection: dial tcp %s:8443: i/o timeout\nINFO inbound ok\n' "$DUMMY_ADDR_MAIN" \
+  | SINGBOXCTL_XRAY_CONFIG="$TMP/xray-backup-first.json" bash "$REPO/singboxctl.sh" scrub)
+if echo "$scrubbed" | grep -qF "$DUMMY_ADDR_MAIN"; then
+  bad "scrub removes server address from log lines"
+elif echo "$scrubbed" | grep -q 'srv-[0-9a-f]\{12\}:8443' && echo "$scrubbed" | grep -q 'INFO inbound ok'; then
+  ok "scrub removes server address from log lines"
+else
+  bad "scrub removes server address from log lines"
+fi
+
+# scrub must stream (journald sees lines while sing-box is still running,
+# not only at EOF) — a slow producer proves lines are flushed per line.
+( printf 'ERROR dial tcp %s:8443 timeout\n' "$DUMMY_ADDR_MAIN"; sleep 2 ) \
+  | SINGBOXCTL_XRAY_CONFIG="$TMP/xray-backup-first.json" bash "$REPO/singboxctl.sh" scrub \
+    > "$TMP/scrub-stream.out" 2>/dev/null &
+stream_pid=$!
+sleep 1
+grep -q 'srv-[0-9a-f]\{12\}:8443' "$TMP/scrub-stream.out" 2>/dev/null \
+  && ok "scrub flushes per line before EOF" \
+  || bad "scrub flushes per line before EOF"
+wait $stream_pid 2>/dev/null
+
 # --- missing outbound is a hard error ----------------------------------------
 python3 - "$TMP/xray-broken.json" <<'PYEOF'
 import json

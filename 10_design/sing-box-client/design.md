@@ -201,7 +201,8 @@ sing-box 的实际运行配置由本地生成器生成：
 - 位置：用户级 tmpfs，重启后消失；
 - 每次服务启动前重新生成；
 - 生成器只输出哈希、字段存在性和校验结果，不输出敏感值；
-- journal 中不得出现 UUID、完整服务器地址、REALITY key 或 short ID。
+- journal 中不得出现 UUID、完整服务器地址、REALITY key 或 short ID；
+- 实现机制：sing-box 在出站拨号失败时会把服务器地址写进错误日志，因此 `run` 的 stdout/stderr 经 scrub 过滤器，把每个服务器地址替换为其 SHA256 前 12 位（`srv-<hash12>`）后再进 journal；过滤器在每次启动时从当次运行时配置重建，不持久化地址。
 
 这样做的原因：sing-box 需要完整 JSON 文件才能启动，但 v1 不应再创建第二份持久化凭据副本。xray 配置同时保留为回滚路径，因此它是迁移期最合适的事实源。
 
@@ -276,7 +277,7 @@ staging 阶段只做显式 `singboxctl check`，不启用自动 failover，不�
 - 主探针：经 `probe-in` 请求 204 目标，必须走 `proxy`；
 - 备用探针：经 `bk-in` 请求同一目标，必须走 `proxy-backup`；
 - Tailscale 探针：经 `ts-in` 请求既定目标，必须走 `proxy-ts`；
-- 普通入口：经 `socks` 请求 204 目标，必须走当前默认出口；
+- 普通入口：经 `socks` 请求一个**不在 geosite-cn 内**的目标，必须走当前默认出口（2026-11-19 实测 `www.gstatic.com` 命中 geosite-cn 会直连，与 xray 时代 vpnctl 记录过的陷阱相同，故默认出口探针用 `api.telegram.org`）；
 - 国内直连目标必须返回成功，且路由证据显示没有走 VPS；
 - 记录 HTTP 码、耗时、配置哈希、二进制版本与规则集哈希。
 
@@ -363,19 +364,21 @@ staging 不影响现有系统代理。回滚动作：
 
 ### 15.2 staging 实施验收
 
-- [ ] sing-box 版本符合 stable、非预发布、满 60 天要求。
-- [ ] 二进制 SHA256 与证据文件一致。
-- [ ] 规则集来源与 SHA256 已记录。
-- [ ] 运行时配置只出现在 `$XDG_RUNTIME_DIR`，权限为 0600。
-- [ ] `sing-box check` 通过。
-- [ ] 策略校验拒绝非 `127.0.0.1` 入站。
-- [ ] 10808～10811 未被 staging 占用。
-- [ ] 主、备、Tailscale、direct 四类路径全部按 tag 出队。
-- [ ] 主备模式与切换前 xray 当前模式一致。
-- [ ] 国内目标直连成功。
-- [ ] IPv6 代理路径快速失败。
-- [ ] 日志扫描未发现敏感值。
-- [ ] staging 回滚后 xray 状态完全不变。
+2026-11-19 首轮实测，证据：`~/.local/state/sing-box-client/staging/2026-11-19-first-run.md`。
+
+- [x] sing-box 版本符合 stable、非预发布、满 60 天要求（1.14.1，2026-09-15 发布）。
+- [x] 二进制 SHA256 与证据文件一致。
+- [x] 规则集来源与 SHA256 已记录。
+- [x] 运行时配置只出现在 `$XDG_RUNTIME_DIR`，权限为 0600（目录 0700）。
+- [x] `sing-box check` 通过（每次 `run` 前强制执行）。
+- [x] 策略校验拒绝非 `127.0.0.1` 入站（离线测试断言四个入站均为 127.0.0.1 且无 `0.0.0.0`）。
+- [x] 10808～10811 未被 staging 占用（`ss -ltn` 实测：staging 只占 18080～18083）。
+- [x] 主、备、Tailscale、direct 四类路径全部按 tag 出队（journal 路由证据齐全；主出口 `proxy` dial 超时为上游条件，同时段 xray 10810 基线同样失败，出队选择本身正确）。
+- [x] 主备模式与切换前 xray 当前模式一致（`route.final=proxy-backup`，与 xray 出站顺序派生一致）。
+- [x] 国内目标直连成功（baidu 200 ×3，journal 显示 `outbound/direct[direct]`）。
+- [x] IPv6 代理路径快速失败（IPv6 字面量经 socks 0.011s 被 SOCKS 拒绝）。
+- [x] 日志扫描未发现敏感值（scrub 过滤器上线后 12 个敏感值全部未命中；上线前的泄漏事件见证据文件）。
+- [x] staging 回滚后 xray 状态完全不变（xray 全程 active 且配置未动；staging 回滚 = 停止测试单元）。
 
 ### 15.3 生产验收
 
@@ -428,3 +431,5 @@ staging 不影响现有系统代理。回滚动作：
 - 2026-11-19 — What: 在 §7.1 补入已核定的规则集确切 URL/格式（SagerNet 官方 `rule-set` 分支 `.srs` 二进制，`type: "local"`）与「快速失败 = route rule `reject` 动作」的写法；在 §11.1 补入版本核定结果（选定 sing-box 1.14.1）。 | Why: 按 §7.1/§11.1 自己的约定，实施时必须以当日官方 Releases 与官方文档实测核定来源，不凭记忆；1.14.2～1.14.4 发布未满 60 天，1.15.0 系列全为 alpha。 | Who: user instruction（“按思路做，留痕”） -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/design.md` §7.1、§11.1、§17；证据文件 `~/.local/state/sing-box-client/upgrades/2026-11-19-source-baseline.md`。 | How: GitHub Releases API（逐 tag 查询）+ releases.atom + 官方文档站核定，HEAD 验证后下载 .srs 并计算 SHA256；blast radius 仅限文档，不改运行中 xray (rollback: revert 本次提交)。
 
 - 2026-11-19 — What: 新增 staging 实施文件 `config.template.json`、`singboxctl.sh`（install/generate/validate/run/status/check）、`sing-box-client-test.service`、`test_singboxctl.sh`、`README.md`；§7.1 增列 `geosite-private.srs`；§8 补「无 `resolve` 动作 = IP 规则不匹配域名」的实现机制。 | Why: 方案 B 进入 P1 staging 实施；私网域名直连需要 geosite-private；DNS 机制需与实现一致（§1 文档先行）。 | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/` 新增上述文件；`design.md` §7.1、§8、§17；规则集证据更新于 `~/.local/state/sing-box-client/upgrades/2026-11-19-source-baseline.md`。 | How: 生成器用 python3 内嵌实现，凭据只从 `~/.config/xray/config.json` 只读进入 `$XDG_RUNTIME_DIR`（0600）；真实配置实测 `validate` 全绿（final=proxy-backup 与当前 xray 模式一致），mock 离线测试 12/12；staging 不触碰 xray 与 10808～10811 (rollback: revert 本次提交并删除新增文件；运行态仅 tmpfs 配置，重启即消失)。
+
+- 2026-11-19 — What: staging 首轮实测并修复三个实测发现的问题：`run` 增加 journal scrub 过滤器（服务器地址→`srv-<hash12>`）、scrub 改行缓冲、`check` 默认出口探针从 gstatic 改为 `api.telegram.org`；§9.2 补 scrub 机制、§12.1 补 gstatic 直连陷阱注、§15.2 勾选首轮验收结果；新增离线测试 2 项（scrub 替换、慢生产者冲刷）。 | Why: 实测发现 sing-box 拨号失败会把服务器地址写进 journal（违反 §9.2）、块缓冲导致 journal 看不到运行日志、gstatic 命中 geosite-cn 导致默认出口探针失真；按 §6 要求修复并把检查固化进测试。 | Who: user instruction（“做吧，留痕”） -> assistant executed. | When: 2026-11-19. | Where: `10_design/sing-box-client/{singboxctl.sh,test_singboxctl.sh,design.md}`；证据 `~/.local/state/sing-box-client/staging/2026-11-19-first-run.md`。 | How: 本机实测（xray 全程未动，10808～10811 未触碰）；14/14 离线测试 + 真实配置 validate 全绿；blast radius 限 staging 端口与 tmpfs 配置；修复前 journal 旧条目含 proxy 服务器地址，保留并记录（rollback: revert 本次提交；staging 回滚 = `systemctl --user stop sing-box-client-test.service`）。

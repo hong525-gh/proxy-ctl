@@ -21,6 +21,10 @@ readonly STAGING_PORTS="socks=18080 ts-in=18081 probe-in=18082 bk-in=18083"
 PROBE_204_URL="${PROBE_204_URL:-https://www.gstatic.com/generate_204}"
 TS_PROBE_URL="${TS_PROBE_URL:-https://api.telegram.org/}"
 DIRECT_PROBE_URL="${DIRECT_PROBE_URL:-https://www.baidu.com/}"
+# gstatic.com is inside geosite-cn, so a "default outbound" probe to it would
+# silently go direct (same trap xray's vpnctl documented). The route.final
+# probe must use a target that no direct rule matches.
+FINAL_PROBE_URL="${FINAL_PROBE_URL:-https://api.telegram.org/}"
 
 usage() {
   cat <<'EOF'
@@ -32,6 +36,7 @@ usage: singboxctl.sh <command>
   run        generate, validate, then exec sing-box (for the systemd unit)
   status     service state + staging listeners (no secrets)
   check      health probes through the staging inbounds (service must run)
+  scrub      filter stdin, replacing vless server addresses with srv-<hash12>
 EOF
 }
 
@@ -261,9 +266,40 @@ PYEOF
   echo "sing-box check: ok"
 }
 
+# Scrub server addresses from log lines: sing-box writes `dial tcp <server>:<port>`
+# into error logs on dial failures, and design section 9.2 forbids full server
+# addresses in the journal. Each address is replaced by srv-<sha256[:12]>.
+cmd_scrub() {
+  # fd 3 keeps the caller's stdin (the log stream); python's own stdin is the
+  # heredoc carrying the program, so it cannot double as the data channel.
+  python3 - "$RUNTIME_DIR/config-staging.json" 3<&0 <<'PYEOF'
+import hashlib
+import json
+import sys
+
+# journald only sees what we flush; without line buffering everything would
+# sit in the block buffer until sing-box exits.
+sys.stdout.reconfigure(line_buffering=True)
+
+with open(sys.argv[1]) as fh:
+    config = json.load(fh)
+addrs = {
+    ob["server"]: "srv-" + hashlib.sha256(ob["server"].encode()).hexdigest()[:12]
+    for ob in config.get("outbounds", [])
+    if ob.get("type") == "vless" and ob.get("server")
+}
+with open("/dev/fd/3") as data:
+    for line in data:
+        for addr, repl in addrs.items():
+            line = line.replace(addr, repl)
+        sys.stdout.write(line)
+sys.stdout.flush()
+PYEOF
+}
+
 cmd_run() {
   cmd_validate
-  exec "$BIN_CURRENT" run -c "$RUNTIME_DIR/config-staging.json"
+  exec "$BIN_CURRENT" run -c "$RUNTIME_DIR/config-staging.json" > >(cmd_scrub) 2>&1
 }
 
 cmd_status() {
@@ -288,7 +324,7 @@ cmd_check() {
   probe probe-in "$PROBE_204_URL" proxy
   probe bk-in "$PROBE_204_URL" proxy-backup
   probe ts-in "$TS_PROBE_URL" proxy-ts
-  probe socks "$PROBE_204_URL" "route.final"
+  probe socks "$FINAL_PROBE_URL" "route.final"
   probe socks "$DIRECT_PROBE_URL" direct
 }
 
@@ -299,5 +335,6 @@ case "${1:-}" in
   run)      cmd_run ;;
   status)   cmd_status ;;
   check)    cmd_check ;;
+  scrub)    cmd_scrub ;;
   *)        usage; exit 2 ;;
 esac
