@@ -2,24 +2,23 @@
 
 ## Repository Status
 
-This project is at bootstrap: the working directory is currently empty and Git
-is not yet initialized. The conventions below define how contributors should
-shape the VPN project as it grows.
+The project is live: Git is initialized with a GitHub remote, the production
+proxy client is sing-box (`10_design/sing-box-client/`, switched on
+2026-11-19), and xray (`10_design/xray-client/`) is disabled but kept as the
+rollback path. A repo-local `.git/hooks/pre-commit` blocks direct commits on
+`main`/`master` — work on a branch, merge with `--no-ff`.
 
 ## Project Structure & Module Organization
 
-Layout follows the parent `10_PROJECTS` workspace conventions:
-
 ```
-VPN/
-├── 00_brief/     # Requirements, background, scope
-├── 10_design/    # Designs, tunnel/config specs, architecture notes
-├── 20_assets/    # Sample configs, certificates (secrets kept out of Git)
-└── 99_done/      # Completed deliverables
+proxy-ctl/
+├── proxy.sh / test_proxy.sh   # shell-level proxy env tool (no_proxy etc.)
+├── DESIGN.md / README.md / TODO.md / CHECKLIST.md
+└── 10_design/                 # designs: xray-client, sing-box-client, VPS docs
 ```
 
-Natural nesting is allowed. Keep VPN configuration artifacts such as `wg0.conf`
-or `.ovpn` files under `10_design/`, and never commit secrets from `20_assets/`.
+Never commit secrets; real credentials live outside the repo (see the global
+single-source rule).
 
 ## Build, Test, and Development Commands
 

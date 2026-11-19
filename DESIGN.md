@@ -29,13 +29,15 @@
 | OS | Fedora Linux 44 (Workstation Edition) |
 | 桌面 | GNOME on Wayland |
 | Shell | Bash 5.3（未安装 zsh） |
-| GUI 代理工具 | **v2rayN**（`/opt/v2rayN/v2rayN`），内核为 **xray** |
+| GUI 代理工具 | **v2rayN**（`/opt/v2rayN/v2rayN`），内核为 **xray**（2026-11-19 起已由 sing-box 接替生产监听，见下注） |
 | xray 监听 | `*:10808`（HTTP + SOCKS 混合入站，单端口复用） |
 | GUI 配置目录 | `~/.local/share/v2rayN/guiConfigs/` |
 | 内核运行配置 | `~/.local/share/v2rayN/binConfigs/config.json` |
 | GNOME 代理模式 | `manual`（四个协议槽位统一指向 `127.0.0.1:10808`） |
 | GNOME `ignore-hosts` | `localhost,127.0.0.0/8,::1` |
 | 是否暴露 REST API | **否**（v2rayN/xray 默认不开管理 API，与 mihomo 不同） |
+
+> **现状注（2026-11-19）**：生产环境 10808 的监听者已换成 **sing-box**（`sing-box-client.service`，mixed 入站，协议形状不变）；v2rayN/xray 转为回滚路径（`vpnctl on` 可恢复）。对 proxy.sh 而言契约不变——只要 `127.0.0.1:10808` 有 HTTP+SOCKS 混合入站即可，工具行为与本文推论不受影响。客户端迁移全文见 `10_design/sing-box-client/design.md`。
 
 **关键推论：**
 
