@@ -531,7 +531,8 @@ vpnctl upgrade <path> --sha256 <hex> --released YYYY-MM-DD --source <url> \
 
 #### 6.9.5 mihomo、sing-box 与 v2rayN
 
-- mihomo / sing-box 不在方案 A 的运行路径上（服务只执行 `~/.local/bin/xray`），不设更新流程；v2rayN 目录里的副本只在打开 v2rayN 时用，卸载时消失或残留都无所谓（T12）。将来切方案 B，再按同一套“官方来源 + 冷却期 + 哈希 + 证据”补升级命令。
+- mihomo 不在方案 A 或方案 B 的运行路径上；v2rayN 目录里的副本只在打开 v2rayN 时用，卸载时消失或残留都无所谓（T12）。
+- sing-box 不在方案 A 的运行路径上（当前服务仍执行 `~/.local/bin/xray`）；它的客户端迁移设计已拆为[方案 B](../sing-box-client/design.md)。方案 B 验收前，本文档仍是生产事实源；方案 B 实施时按同一套“官方来源 + 冷却期 + 哈希 + 证据”补升级命令。
 - v2rayN 只作应急 GUI，rpm 正常更新；它更新自带内核不会改 `~/.config/xray/config.json`。不要与服务同时跑（抢 10808）。
 
 ### 6.10 失败提示契约
@@ -832,6 +833,7 @@ DoH 直连查询均无响应——境外公共 DoH 的 IP 直连本身被墙，�
 
 ## 13. 变更记录
 
+- 2026-11-19 — What: updated §6.9.5 to name `10_design/sing-box-client/design.md` as the approved Scheme B design while keeping xray as the current production core. | Why: user approved a client-side sing-box + Tailscale migration and required a documented, traceable plan before implementation. | Who: user instruction -> assistant executed. | When: 2026-11-19. | Where: `10_design/xray-client/design.md` §6.9.5 and §13. | How: hand edit linking the sibling design; blast radius is documentation only (rollback: revert the `sing-box-client-design` merge commit).
 - 2026-11-12（二）：Telegram 由 `proxy-ts` pin 改为跟随默认路由。What：删除路由表两条 `telegram → proxy-ts` 规则（domain 与 geoip），保留 `ts-in → proxy-ts` 探针规则与 `proxy-ts` 出站；§6.11「仍显式 pin 的只有」清单与「备用出口不接管 Telegram」条目同步修订；T20/T23 路由真值表更新（79 项仍全绿）。Why：VPS 故障期间 `proxy-ts`（tailnet）与 VPS 同死，pin 着 Telegram 等于备用模式下 Telegram 陪葬；用户明确要求 Telegram 走代理。Who：用户指令 → 助手实施。How：jq 删规则 → 三段式校验 → 备份 → 重启；实机验证 `api.telegram.org [socks >> proxy-backup]` 302、core.telegram.org 200。代价：VPS 恢复后 Telegram 回到公网路径，失去 2026-11-05 引入 proxy-ts 的抗丢包特性；若联通出口丢包复发，重新加回两条规则即可（配置备份在 `~/.local/state/vpn/backups/`）。Rollback：`vpnctl rollback` 恢复最近一次备份。
 - 2026-11-13：主出口改走 tailnet + 备用出口由机场改为 VPS 公网路径。What：① `~/.config/xray/config.json` 的 `proxy` 出站地址 → `100.118.65.105`（tailnet）；② `proxy-backup` 出站由机场 trojan（vbg69tna.3nvx.com:13006）整体替换为 vless+REALITY → `156.238.127.216:8443`（复制 `proxy` 参数仅改地址）；③ design.md §1 范围、§2 非目标、§3.3 D9、§6.11 标题/模型/已知限制、§11 风险表同步修订；④ `vpnctl.sh` 状态行 `backup  : airport via proxy-backup` 改为 `backup  : proxy-backup (<实际地址>)` 动态显示、backup 模式警告文案去机场化；`test_vpnctl.sh` 断言同步。Why：服务商完成 IP 切换（`207.56.18.51` → `156.238.127.216`）；用户决定主出口走 tailnet（对“家宽封锁单个 IP”免疫，DERP 中转兜底）、机场订阅到期不续并指定 VPS 公网路径接任备用；当日机场中继曾被联通线路定向封锁（后自恢复），证明共享出口不可靠。Who：用户指令 → 助手实施。How：先实机验证公网路径可行（TCP 8443 通、临时出站 204 探针 0.42s、exit IP 正确），再落盘；`vpnctl use backup`/`use primary` 往返各一次实测通过（exit 均为 156.238.127.216）；备份 `~/.local/state/vpn/backups/config-20261113-124742.json`、`config-20261113-130756.json`。已知代价：主备同机，VPS 整机故障时同死（§6.11 已知限制）；tailnet 路径吞吐受蜂窝链路影响波动大（CF 测速 50–174 KB/s 浮动）。Rollback：`vpnctl rollback` 或从上述备份恢复。
 - 2026-11-13（二）：主备路径互换定稿——`proxy` 回 VPS 公网 IP、`proxy-backup` 改 tailnet IP。What：交换两出站的地址（`proxy` → 156.238.127.216，`proxy-backup` → 100.118.65.105）；§6.11 模型两条 bullet 按定稿重写。Why：同日早些时候的"tailnet 主、公网备"在蜂窝网络下实测退化——tailnet 经常打洞失败退到 DERP 中转（ping 0.5–1s，204 探针 2–5s），而公网路径稳定 0.4s；tailnet 的防封锁价值由备用角色保留（家宽封 VPS 公网 IP 时 AUTO_FAILOVER 切 tailnet）。用户同时希望保留按域名/应用选择路径的能力（Telegram 等可随时重新 pin 到 `proxy-ts`）。Who：用户提议，助手附议并实施。How：jq 交换地址 → 校验 → 备份（`config-20261113-142145.json`）→ 重启 → 双探针实测（主 0.5s / 备 4.8s 均 204）→ google 200 / telegram 302 实测 → 两轮健康检查稳定 primary。Rollback：同上，`vpnctl rollback`。
